@@ -794,6 +794,116 @@ async def get_team_list(current_user: dict = Depends(get_current_active_user)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
+# ==================== ADMIN TEAM ROUTES ====================
+
+@app.get("/api/admin/team/all")
+async def get_all_teams(
+    current_admin: dict = Depends(get_current_admin),
+    search: Optional[str] = None,
+    placement: Optional[str] = None
+):
+    """Get all teams (admin only)"""
+    try:
+        # Get all team relationships
+        query = {}
+        if placement and placement != "ALL":
+            query["placement"] = placement.upper()
+        
+        teams = list(teams_collection.find(query))
+        
+        result = []
+        for team in teams:
+            user = users_collection.find_one({"_id": ObjectId(team["userId"])})
+            sponsor = users_collection.find_one({"_id": ObjectId(team["sponsorId"])})
+            
+            if user:
+                member_data = {
+                    "id": str(user["_id"]),
+                    "name": user["name"],
+                    "email": user.get("email", ""),
+                    "mobile": user.get("mobile", ""),
+                    "referralId": user["referralId"],
+                    "placement": team.get("placement"),
+                    "currentPlan": user.get("currentPlan"),
+                    "isActive": user.get("isActive", False),
+                    "joinedAt": user.get("createdAt", datetime.utcnow()).isoformat(),
+                    "sponsorName": sponsor["name"] if sponsor else "N/A",
+                    "sponsorId": sponsor["referralId"] if sponsor else "N/A"
+                }
+                
+                # Apply search filter if provided
+                if search:
+                    search_lower = search.lower()
+                    if (search_lower in member_data["name"].lower() or
+                        search_lower in member_data["referralId"].lower() or
+                        search_lower in member_data.get("email", "").lower()):
+                        result.append(member_data)
+                else:
+                    result.append(member_data)
+        
+        # Calculate stats
+        left_count = len([t for t in teams if t.get("placement") == "LEFT"])
+        right_count = len([t for t in teams if t.get("placement") == "RIGHT"])
+        
+        return {
+            "success": True,
+            "data": {
+                "members": serialize_doc(result),
+                "stats": {
+                    "totalMembers": len(result),
+                    "leftMembers": left_count,
+                    "rightMembers": right_count
+                }
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/admin/team/tree/{user_id}")
+async def get_admin_team_tree(
+    user_id: str,
+    current_admin: dict = Depends(get_current_admin)
+):
+    """Get team tree for any user (admin only)"""
+    try:
+        def build_tree(user_id: str) -> dict:
+            user = users_collection.find_one({"_id": ObjectId(user_id)})
+            if not user:
+                return None
+            
+            # Get left and right children
+            team = teams_collection.find_one({"parentId": user_id})
+            left_child = None
+            right_child = None
+            
+            if team:
+                if team.get("leftChildId"):
+                    left_child = build_tree(team["leftChildId"])
+                if team.get("rightChildId"):
+                    right_child = build_tree(team["rightChildId"])
+            
+            return {
+                "id": str(user["_id"]),
+                "name": user["name"],
+                "referralId": user["referralId"],
+                "placement": team.get("placement") if team else None,
+                "currentPlan": user.get("currentPlan"),
+                "isActive": user.get("isActive", False),
+                "left": left_child,
+                "right": right_child
+            }
+        
+        tree = build_tree(user_id)
+        
+        return {
+            "success": True,
+            "data": serialize_doc(tree)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ==================== PLANS ROUTES ====================
 
 @app.get("/api/plans")
