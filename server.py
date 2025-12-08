@@ -1382,8 +1382,8 @@ def distribute_pv_upward(user_id: str, pv_amount: int):
                 }
             )
             
-            # Calculate matching income for this sponsor
-            calculate_matching_income(sponsor_id)
+            # Note: Matching income will be calculated at end of day
+            # Not calculated immediately to allow PV accumulation
             
             # Move up to next sponsor
             sponsor_team = teams_collection.find_one({"userId": sponsor_id})
