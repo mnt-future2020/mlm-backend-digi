@@ -827,7 +827,10 @@ async def get_user_details(user_id: str, current_user: dict = Depends(get_curren
     """Get detailed user information"""
     try:
         # Find user by either MongoDB _id or referralId
-        user = users_collection.find_one({"$or": [{"_id": ObjectId(user_id)}, {"referralId": user_id}]})
+        try:
+            user = users_collection.find_one({"_id": ObjectId(user_id)})
+        except:
+            user = users_collection.find_one({"referralId": user_id})
         
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
