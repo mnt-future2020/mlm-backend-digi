@@ -868,10 +868,19 @@ async def get_user_dashboard(current_user: dict = Depends(get_current_active_use
         
         # Get current plan
         current_plan = None
-        if current_user.get("currentPlan"):
-            plan = plans_collection.find_one({"_id": ObjectId(current_user["currentPlan"])})
-            if plan:
-                current_plan = serialize_doc(plan)
+        plan_id = current_user.get("currentPlanId")
+        if plan_id:
+            try:
+                plan = plans_collection.find_one({"_id": ObjectId(plan_id)})
+                if plan:
+                    current_plan = serialize_doc(plan)
+            except:
+                # If currentPlanId is invalid, try with currentPlan name
+                plan_name = current_user.get("currentPlan")
+                if plan_name:
+                    plan = plans_collection.find_one({"name": plan_name})
+                    if plan:
+                        current_plan = serialize_doc(plan)
         
         # Get recent transactions
         transactions = list(transactions_collection.find(
