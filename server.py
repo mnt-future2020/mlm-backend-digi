@@ -1434,6 +1434,290 @@ async def root():
         "message": "VSV Unite MLM API",
         "version": "1.0.0",
         "status": "running"
+
+# ============ TOPUP/PLAN ACTIVATION MANAGEMENT (ADMIN) ============
+
+class TopupRequest(BaseModel):
+    userId: str
+    planId: str
+    amount: float
+    paymentMode: str
+    transactionId: str
+    paymentProof: Optional[str] = None
+
+@app.get("/api/admin/topups")
+async def get_all_topups(
+    current_admin: dict = Depends(get_current_admin),
+    status: Optional[str] = None
+):
+    """Get all topup/plan activation requests"""
+    try:
+        query = {}
+        if status:
+            query["status"] = status.upper()
+        
+        topups = list(topups_collection.find(query).sort("requestedAt", DESCENDING))
+        
+        # Enrich with user and plan details
+        for topup in topups:
+            if topup.get("userId"):
+                user = users_collection.find_one({"_id": ObjectId(topup["userId"])})
+                if user:
+                    topup["userName"] = user.get("name")
+                    topup["userEmail"] = user.get("email")
+                    topup["referralId"] = user.get("referralId")
+            
+            if topup.get("planId"):
+                plan = plans_collection.find_one({"_id": ObjectId(topup["planId"])})
+                if plan:
+                    topup["planName"] = plan.get("name")
+        
+        return {
+            "success": True,
+            "data": serialize_doc(topups)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/admin/topups/{topup_id}/approve")
+async def approve_topup(
+    topup_id: str,
+    current_admin: dict = Depends(get_current_admin)
+):
+    """Approve a topup/plan activation request"""
+    try:
+        topup = topups_collection.find_one({"_id": ObjectId(topup_id)})
+        if not topup:
+            raise HTTPException(status_code=404, detail="Topup request not found")
+        
+        if topup["status"] != "PENDING":
+            raise HTTPException(status_code=400, detail="Only pending requests can be approved")
+        
+        user_id = topup["userId"]
+        plan_id = topup["planId"]
+        
+        # Get plan details
+        plan = plans_collection.find_one({"_id": ObjectId(plan_id)})
+        if not plan:
+            raise HTTPException(status_code=404, detail="Plan not found")
+        
+        # Update user's current plan
+        users_collection.update_one(
+            {"_id": ObjectId(user_id)},
+            {
+                "$set": {
+                    "currentPlanId": plan_id,
+                    "currentPlan": plan["name"],
+                    "activatedAt": datetime.utcnow()
+                }
+            }
+        )
+        
+        # Update topup status
+        topups_collection.update_one(
+            {"_id": ObjectId(topup_id)},
+            {
+                "$set": {
+                    "status": "APPROVED",
+                    "approvedAt": datetime.utcnow(),
+                    "approvedBy": current_admin["id"]
+                }
+            }
+        )
+        
+        # Give referral income to sponsor
+        user = users_collection.find_one({"_id": ObjectId(user_id)})
+        if user and user.get("sponsorId"):
+            sponsor = users_collection.find_one({"_id": ObjectId(user["sponsorId"])})
+            if sponsor:
+                referral_income = plan.get("referralIncome", 0)
+                
+                # Update sponsor wallet
+                wallets_collection.update_one(
+                    {"userId": user["sponsorId"]},
+                    {"$inc": {"balance": referral_income}}
+                )
+                
+                # Create transaction for sponsor
+                transactions_collection.insert_one({
+                    "userId": user["sponsorId"],
+                    "type": "REFERRAL_INCOME",
+                    "amount": referral_income,
+                    "description": f"Referral income from {user['name']} plan activation",
+                    "status": "COMPLETED",
+                    "createdAt": datetime.utcnow()
+                })
+        
+        return {
+            "success": True,
+            "message": "Topup approved successfully"
+        }
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/admin/topups/{topup_id}/reject")
+async def reject_topup(
+    topup_id: str,
+    data: dict = Body(...),
+    current_admin: dict = Depends(get_current_admin)
+):
+    """Reject a topup/plan activation request"""
+    try:
+        topup = topups_collection.find_one({"_id": ObjectId(topup_id)})
+        if not topup:
+            raise HTTPException(status_code=404, detail="Topup request not found")
+        
+        if topup["status"] != "PENDING":
+            raise HTTPException(status_code=400, detail="Only pending requests can be rejected")
+        
+        reason = data.get("reason", "Rejected by admin")
+        
+        topups_collection.update_one(
+            {"_id": ObjectId(topup_id)},
+            {
+                "$set": {
+                    "status": "REJECTED",
+                    "rejectedAt": datetime.utcnow(),
+                    "rejectedBy": current_admin["id"],
+                    "rejectionReason": reason
+                }
+            }
+        )
+        
+        return {
+            "success": True,
+            "message": "Topup rejected successfully"
+        }
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============ REPORTS & ANALYTICS (ADMIN) ============
+
+@app.get("/api/admin/reports/dashboard")
+async def get_dashboard_reports(
+    current_admin: dict = Depends(get_current_admin)
+):
+    """Get dashboard analytics and reports"""
+    try:
+        # Total users count
+        total_users = users_collection.count_documents({"role": "user"})
+        active_users = users_collection.count_documents({"role": "user", "isActive": True})
+        
+        # Total earnings (sum of all credit transactions)
+        total_earnings_pipeline = [
+            {"$match": {"amount": {"$gt": 0}}},
+            {"$group": {"_id": None, "total": {"$sum": "$amount"}}}
+        ]
+        total_earnings_result = list(transactions_collection.aggregate(total_earnings_pipeline))
+        total_earnings = total_earnings_result[0]["total"] if total_earnings_result else 0
+        
+        # Total withdrawals
+        total_withdrawals_pipeline = [
+            {"$match": {"status": "APPROVED"}},
+            {"$group": {"_id": None, "total": {"$sum": "$amount"}}}
+        ]
+        total_withdrawals_result = list(withdrawals_collection.aggregate(total_withdrawals_pipeline))
+        total_withdrawals = total_withdrawals_result[0]["total"] if total_withdrawals_result else 0
+        
+        # Pending withdrawals
+        pending_withdrawals = withdrawals_collection.count_documents({"status": "PENDING"})
+        pending_withdrawals_amount_pipeline = [
+            {"$match": {"status": "PENDING"}},
+            {"$group": {"_id": None, "total": {"$sum": "$amount"}}}
+        ]
+        pending_withdrawals_amount_result = list(withdrawals_collection.aggregate(pending_withdrawals_amount_pipeline))
+        pending_withdrawals_amount = pending_withdrawals_amount_result[0]["total"] if pending_withdrawals_amount_result else 0
+        
+        # Plan distribution
+        plan_distribution = {}
+        for plan in plans_collection.find():
+            count = users_collection.count_documents({"currentPlanId": str(plan["_id"])})
+            plan_distribution[plan["name"]] = count
+        
+        # Recent registrations (last 7 days)
+        seven_days_ago = datetime.utcnow() - timedelta(days=7)
+        recent_registrations = users_collection.count_documents({
+            "role": "user",
+            "createdAt": {"$gte": seven_days_ago}
+        })
+        
+        # Daily business report (last 7 days)
+        daily_reports = []
+        for i in range(6, -1, -1):
+            day_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=i)
+            day_end = day_start + timedelta(days=1)
+            
+            # New users on this day
+            new_users = users_collection.count_documents({
+                "role": "user",
+                "createdAt": {"$gte": day_start, "$lt": day_end}
+            })
+            
+            # Topups on this day
+            topups_pipeline = [
+                {"$match": {
+                    "status": "APPROVED",
+                    "approvedAt": {"$gte": day_start, "$lt": day_end}
+                }},
+                {"$group": {"_id": None, "total": {"$sum": "$amount"}}}
+            ]
+            topups_result = list(topups_collection.aggregate(topups_pipeline))
+            topups_amount = topups_result[0]["total"] if topups_result else 0
+            
+            # Payouts on this day
+            payouts_pipeline = [
+                {"$match": {
+                    "status": "APPROVED",
+                    "approvedAt": {"$gte": day_start, "$lt": day_end}
+                }},
+                {"$group": {"_id": None, "total": {"$sum": "$amount"}}}
+            ]
+            payouts_result = list(withdrawals_collection.aggregate(payouts_pipeline))
+            payouts_amount = payouts_result[0]["total"] if payouts_result else 0
+            
+            daily_reports.append({
+                "date": day_start.strftime("%Y-%m-%d"),
+                "newUsers": new_users,
+                "topups": topups_amount,
+                "payouts": payouts_amount,
+                "netBusiness": topups_amount - payouts_amount
+            })
+        
+        # Income breakdown
+        income_types = {}
+        for income_type in ["REFERRAL_INCOME", "MATCHING_INCOME", "LEVEL_INCOME"]:
+            pipeline = [
+                {"$match": {"type": income_type}},
+                {"$group": {"_id": None, "total": {"$sum": "$amount"}}}
+            ]
+            result = list(transactions_collection.aggregate(pipeline))
+            income_types[income_type] = result[0]["total"] if result else 0
+        
+        return {
+            "success": True,
+            "data": {
+                "overview": {
+                    "totalUsers": total_users,
+                    "activeUsers": active_users,
+                    "totalEarnings": total_earnings,
+                    "totalWithdrawals": total_withdrawals,
+                    "pendingWithdrawals": pending_withdrawals,
+                    "pendingWithdrawalsAmount": pending_withdrawals_amount,
+                    "recentRegistrations": recent_registrations
+                },
+                "planDistribution": plan_distribution,
+                "dailyReports": daily_reports,
+                "incomeBreakdown": income_types
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
     }
 
 @app.get("/api/health")
