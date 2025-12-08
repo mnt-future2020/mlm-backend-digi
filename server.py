@@ -2740,6 +2740,350 @@ async def get_users_by_plan_report(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+# FINANCIAL REPORTS
+
+@app.get("/api/admin/reports/financial/earnings")
+async def get_earnings_report(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    format: str = "json",
+    current_admin: dict = Depends(get_current_admin)
+):
+    """Get earnings summary report"""
+    try:
+        start, end = parse_date_range(start_date, end_date)
+        
+        query = {"amount": {"$gt": 0}}
+        if start or end:
+            query["createdAt"] = {}
+            if start:
+                query["createdAt"]["$gte"] = start
+            if end:
+                query["createdAt"]["$lte"] = end
+        
+        transactions = list(transactions_collection.find(query))
+        
+        report_data = []
+        for txn in transactions:
+            user = users_collection.find_one({"_id": ObjectId(txn.get("userId"))})
+            report_data.append({
+                "Date": txn.get("createdAt", datetime.now()).strftime("%d-%m-%Y %I:%M %p") if txn.get("createdAt") else "",
+                "User": user.get("name", "") if user else "",
+                "Referral ID": user.get("referralId", "") if user else "",
+                "Type": txn.get("type", ""),
+                "Amount": f"₹{txn.get('amount', 0)}",
+                "Description": txn.get("description", "")
+            })
+        
+        if format == "excel":
+            headers = ["Date", "User", "Referral ID", "Type", "Amount", "Description"]
+            output = generate_excel_report(report_data, headers, "Earnings Summary Report")
+            return StreamingResponse(
+                output,
+                media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                headers={"Content-Disposition": f"attachment; filename=earnings_report_{datetime.now(IST).strftime('%Y%m%d_%H%M%S')}.xlsx"}
+            )
+        elif format == "pdf":
+            headers = ["Date", "User", "Referral ID", "Type", "Amount"]
+            pdf_data = [{k: v for k, v in item.items() if k != "Description"} for item in report_data]
+            output = generate_pdf_report(pdf_data, headers, "Earnings Summary Report")
+            return StreamingResponse(
+                output,
+                media_type="application/pdf",
+                headers={"Content-Disposition": f"attachment; filename=earnings_report_{datetime.now(IST).strftime('%Y%m%d_%H%M%S')}.pdf"}
+            )
+        else:
+            total_earnings = sum([txn.get("amount", 0) for txn in transactions])
+            return {
+                "success": True,
+                "data": report_data,
+                "summary": {
+                    "total": len(report_data),
+                    "totalAmount": total_earnings
+                }
+            }
+    
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/admin/reports/financial/income-breakdown")
+async def get_income_breakdown_report(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    format: str = "json",
+    current_admin: dict = Depends(get_current_admin)
+):
+    """Get income breakdown by type"""
+    try:
+        start, end = parse_date_range(start_date, end_date)
+        
+        query = {"amount": {"$gt": 0}, "type": {"$in": ["REFERRAL_INCOME", "MATCHING_INCOME", "LEVEL_INCOME"]}}
+        if start or end:
+            query["createdAt"] = {}
+            if start:
+                query["createdAt"]["$gte"] = start
+            if end:
+                query["createdAt"]["$lte"] = end
+        
+        transactions = list(transactions_collection.find(query))
+        
+        # Group by type
+        breakdown = {}
+        for txn in transactions:
+            income_type = txn.get("type", "UNKNOWN")
+            if income_type not in breakdown:
+                breakdown[income_type] = {"count": 0, "total": 0, "transactions": []}
+            breakdown[income_type]["count"] += 1
+            breakdown[income_type]["total"] += txn.get("amount", 0)
+            breakdown[income_type]["transactions"].append(txn)
+        
+        report_data = []
+        for income_type, data in breakdown.items():
+            report_data.append({
+                "Income Type": income_type.replace("_", " ").title(),
+                "Transaction Count": data["count"],
+                "Total Amount": f"₹{data['total']}"
+            })
+        
+        if format == "excel":
+            headers = ["Income Type", "Transaction Count", "Total Amount"]
+            output = generate_excel_report(report_data, headers, "Income Breakdown Report")
+            return StreamingResponse(
+                output,
+                media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                headers={"Content-Disposition": f"attachment; filename=income_breakdown_{datetime.now(IST).strftime('%Y%m%d_%H%M%S')}.xlsx"}
+            )
+        elif format == "pdf":
+            headers = ["Income Type", "Transaction Count", "Total Amount"]
+            output = generate_pdf_report(report_data, headers, "Income Breakdown Report")
+            return StreamingResponse(
+                output,
+                media_type="application/pdf",
+                headers={"Content-Disposition": f"attachment; filename=income_breakdown_{datetime.now(IST).strftime('%Y%m%d_%H%M%S')}.pdf"}
+            )
+        else:
+            return {"success": True, "data": report_data, "breakdown": breakdown}
+    
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/admin/reports/financial/withdrawals")
+async def get_withdrawals_report(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    status: Optional[str] = None,
+    format: str = "json",
+    current_admin: dict = Depends(get_current_admin)
+):
+    """Get withdrawals/payout history report"""
+    try:
+        start, end = parse_date_range(start_date, end_date)
+        
+        query = {}
+        if start or end:
+            query["createdAt"] = {}
+            if start:
+                query["createdAt"]["$gte"] = start
+            if end:
+                query["createdAt"]["$lte"] = end
+        
+        if status and status != "all":
+            query["status"] = status.upper()
+        
+        withdrawals = list(withdrawals_collection.find(query))
+        
+        report_data = []
+        for withdrawal in withdrawals:
+            user = users_collection.find_one({"_id": ObjectId(withdrawal.get("userId"))})
+            report_data.append({
+                "Date": withdrawal.get("createdAt", datetime.now()).strftime("%d-%m-%Y") if withdrawal.get("createdAt") else "",
+                "User": user.get("name", "") if user else "",
+                "Referral ID": user.get("referralId", "") if user else "",
+                "Amount": f"₹{withdrawal.get('amount', 0)}",
+                "Status": withdrawal.get("status", ""),
+                "Approved Date": withdrawal.get("approvedAt", datetime.now()).strftime("%d-%m-%Y") if withdrawal.get("approvedAt") else "N/A"
+            })
+        
+        if format == "excel":
+            headers = ["Date", "User", "Referral ID", "Amount", "Status", "Approved Date"]
+            output = generate_excel_report(report_data, headers, "Withdrawals Report")
+            return StreamingResponse(
+                output,
+                media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                headers={"Content-Disposition": f"attachment; filename=withdrawals_report_{datetime.now(IST).strftime('%Y%m%d_%H%M%S')}.xlsx"}
+            )
+        elif format == "pdf":
+            headers = ["Date", "User", "Referral ID", "Amount", "Status"]
+            pdf_data = [{k: v for k, v in item.items() if k != "Approved Date"} for item in report_data]
+            output = generate_pdf_report(pdf_data, headers, "Withdrawals Report")
+            return StreamingResponse(
+                output,
+                media_type="application/pdf",
+                headers={"Content-Disposition": f"attachment; filename=withdrawals_report_{datetime.now(IST).strftime('%Y%m%d_%H%M%S')}.pdf"}
+            )
+        else:
+            total_amount = sum([w.get("amount", 0) for w in withdrawals])
+            return {
+                "success": True,
+                "data": report_data,
+                "summary": {
+                    "total": len(report_data),
+                    "totalAmount": total_amount
+                }
+            }
+    
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/admin/reports/financial/topups")
+async def get_topups_report(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    format: str = "json",
+    current_admin: dict = Depends(get_current_admin)
+):
+    """Get topups history report"""
+    try:
+        start, end = parse_date_range(start_date, end_date)
+        
+        query = {}
+        if start or end:
+            query["createdAt"] = {}
+            if start:
+                query["createdAt"]["$gte"] = start
+            if end:
+                query["createdAt"]["$lte"] = end
+        
+        topups = list(topups_collection.find(query))
+        
+        report_data = []
+        for topup in topups:
+            user = users_collection.find_one({"_id": ObjectId(topup.get("userId"))})
+            report_data.append({
+                "Date": topup.get("createdAt", datetime.now()).strftime("%d-%m-%Y") if topup.get("createdAt") else "",
+                "User": user.get("name", "") if user else "",
+                "Referral ID": user.get("referralId", "") if user else "",
+                "Amount": f"₹{topup.get('amount', 0)}",
+                "Status": topup.get("status", ""),
+                "Payment Method": topup.get("paymentMethod", "")
+            })
+        
+        if format == "excel":
+            headers = ["Date", "User", "Referral ID", "Amount", "Status", "Payment Method"]
+            output = generate_excel_report(report_data, headers, "Topups Report")
+            return StreamingResponse(
+                output,
+                media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                headers={"Content-Disposition": f"attachment; filename=topups_report_{datetime.now(IST).strftime('%Y%m%d_%H%M%S')}.xlsx"}
+            )
+        elif format == "pdf":
+            headers = ["Date", "User", "Referral ID", "Amount", "Status", "Payment Method"]
+            output = generate_pdf_report(report_data, headers, "Topups Report")
+            return StreamingResponse(
+                output,
+                media_type="application/pdf",
+                headers={"Content-Disposition": f"attachment; filename=topups_report_{datetime.now(IST).strftime('%Y%m%d_%H%M%S')}.pdf"}
+            )
+        else:
+            total_amount = sum([t.get("amount", 0) for t in topups])
+            return {
+                "success": True,
+                "data": report_data,
+                "summary": {
+                    "total": len(report_data),
+                    "totalAmount": total_amount
+                }
+            }
+    
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/admin/reports/financial/business")
+async def get_business_report(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    format: str = "json",
+    current_admin: dict = Depends(get_current_admin)
+):
+    """Get daily/weekly/monthly business report"""
+    try:
+        start, end = parse_date_range(start_date, end_date)
+        
+        if not start:
+            start = datetime.now() - timedelta(days=30)
+        if not end:
+            end = datetime.now()
+        
+        # Generate daily reports
+        daily_reports = []
+        current_date = start
+        while current_date <= end:
+            day_end = current_date.replace(hour=23, minute=59, second=59)
+            
+            # New registrations
+            new_users = users_collection.count_documents({
+                "role": "user",
+                "createdAt": {"$gte": current_date, "$lte": day_end}
+            })
+            
+            # Topups
+            topups_pipeline = [
+                {"$match": {"status": "APPROVED", "approvedAt": {"$gte": current_date, "$lte": day_end}}},
+                {"$group": {"_id": None, "total": {"$sum": "$amount"}}}
+            ]
+            topups_result = list(topups_collection.aggregate(topups_pipeline))
+            topups_amount = topups_result[0]["total"] if topups_result else 0
+            
+            # Payouts
+            payouts_pipeline = [
+                {"$match": {"status": "APPROVED", "approvedAt": {"$gte": current_date, "$lte": day_end}}},
+                {"$group": {"_id": None, "total": {"$sum": "$amount"}}}
+            ]
+            payouts_result = list(withdrawals_collection.aggregate(payouts_pipeline))
+            payouts_amount = payouts_result[0]["total"] if payouts_result else 0
+            
+            daily_reports.append({
+                "Date": current_date.strftime("%d-%m-%Y"),
+                "New Users": new_users,
+                "Topups": f"₹{topups_amount}",
+                "Payouts": f"₹{payouts_amount}",
+                "Net Business": f"₹{topups_amount - payouts_amount}"
+            })
+            
+            current_date += timedelta(days=1)
+        
+        if format == "excel":
+            headers = ["Date", "New Users", "Topups", "Payouts", "Net Business"]
+            output = generate_excel_report(daily_reports, headers, "Daily Business Report")
+            return StreamingResponse(
+                output,
+                media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                headers={"Content-Disposition": f"attachment; filename=business_report_{datetime.now(IST).strftime('%Y%m%d_%H%M%S')}.xlsx"}
+            )
+        elif format == "pdf":
+            headers = ["Date", "New Users", "Topups", "Payouts", "Net Business"]
+            output = generate_pdf_report(daily_reports, headers, "Daily Business Report")
+            return StreamingResponse(
+                output,
+                media_type="application/pdf",
+                headers={"Content-Disposition": f"attachment; filename=business_report_{datetime.now(IST).strftime('%Y%m%d_%H%M%S')}.pdf"}
+            )
+        else:
+            return {"success": True, "data": daily_reports, "total": len(daily_reports)}
+    
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/api/health")
 async def health_check():
     """Health check endpoint"""
