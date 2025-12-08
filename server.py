@@ -103,13 +103,46 @@ def serialize_doc(doc):
     return doc
 
 # Get current user from token
-async def get_current_user(token: str = Depends(lambda: None)):
-    """Extract user from JWT token in cookie or header"""
-    from fastapi import Request, Header
+async def get_current_user(authorization: Optional[str] = None):
+    """Extract user from JWT token in Authorization header"""
+    from fastapi import Header
     
-    # This is a simplified version - you'd get token from cookie/header in real implementation
-    # For now, we'll handle it in the routes
-    return None
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    token = authorization.replace("Bearer ", "")
+    
+    try:
+        payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
+        user_id: str = payload.get("userId")
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid token")
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    
+    user = users_collection.find_one({"_id": ObjectId(user_id)})
+    if user is None:
+        raise HTTPException(status_code=401, detail="User not found")
+    
+    return serialize_doc(user)
+
+async def get_current_active_user(authorization: Optional[str] = Header(None)):
+    """Get current active user"""
+    user = await get_current_user(authorization)
+    if not user.get("isActive"):
+        raise HTTPException(status_code=400, detail="Inactive user")
+    return user
+
+async def get_current_admin(authorization: Optional[str] = Header(None)):
+    """Get current admin user"""
+    user = await get_current_user(authorization)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Not authorized")
+    return user
 
 # Pydantic Models
 class UserRegister(BaseModel):
