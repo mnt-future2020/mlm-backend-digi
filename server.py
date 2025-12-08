@@ -2268,7 +2268,15 @@ async def get_dashboard_reports(
         # Plan distribution
         plan_distribution = {}
         for plan in plans_collection.find():
-            count = users_collection.count_documents({"currentPlanId": str(plan["_id"])})
+            # Count users with this plan (handle both ObjectId and string formats)
+            plan_id_str = str(plan["_id"])
+            count = users_collection.count_documents({
+                "$or": [
+                    {"currentPlan": plan_id_str},
+                    {"currentPlan": plan["_id"]},
+                    {"currentPlan": plan["name"]}
+                ]
+            })
             plan_distribution[plan["name"]] = count
         
         # Recent registrations (last 7 days)
