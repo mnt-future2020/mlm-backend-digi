@@ -2055,11 +2055,19 @@ async def get_all_withdrawals(
         
         withdrawals = list(withdrawals_collection.find(query).sort("requestedAt", DESCENDING))
         
+        if not withdrawals:
+            return {"success": True, "data": []}
+        
+        # Batch fetch all users
+        user_ids = [ObjectId(w["userId"]) for w in withdrawals]
+        users_list = list(users_collection.find({"_id": {"$in": user_ids}}))
+        users_map = {str(user["_id"]): user for user in users_list}
+        
         # Add user details
         result = []
         for withdrawal in withdrawals:
-            user = users_collection.find_one({"_id": ObjectId(withdrawal["userId"])})
             withdrawal_data = serialize_doc(withdrawal)
+            user = users_map.get(withdrawal["userId"])
             if user:
                 withdrawal_data["userName"] = user["name"]
                 withdrawal_data["userEmail"] = user.get("email", "")
