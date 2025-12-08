@@ -1644,6 +1644,38 @@ async def update_plan(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
+@app.delete("/api/admin/plans/{plan_id}")
+async def delete_plan(
+    plan_id: str,
+    current_admin: dict = Depends(get_current_admin)
+):
+    """Delete plan (admin only)"""
+    try:
+        plan = plans_collection.find_one({"_id": ObjectId(plan_id)})
+        if not plan:
+            raise HTTPException(status_code=404, detail="Plan not found")
+        
+        # Check if any users have this plan
+        users_with_plan = users_collection.count_documents({"currentPlanId": plan_id})
+        if users_with_plan > 0:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Cannot delete plan. {users_with_plan} users are currently on this plan"
+            )
+        
+        plans_collection.delete_one({"_id": ObjectId(plan_id)})
+        
+        return {
+            "success": True,
+            "message": "Plan deleted successfully"
+        }
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ==================== HEALTH CHECK ====================
 
 @app.get("/")
