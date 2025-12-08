@@ -2344,6 +2344,11 @@ async def get_dashboard_reports(
             result = list(transactions_collection.aggregate(pipeline))
             income_types[income_type] = result[0]["total"] if result else 0
         
+        # Recent users
+        recent_users = list(users_collection.find(
+            {"role": "user"}
+        ).sort("createdAt", DESCENDING).limit(5))
+        
         return {
             "success": True,
             "data": {
@@ -2360,7 +2365,8 @@ async def get_dashboard_reports(
                 },
                 "planDistribution": plan_distribution,
                 "dailyReports": daily_reports,
-                "incomeBreakdown": income_types
+                "incomeBreakdown": income_types,
+                "recentUsers": serialize_doc(recent_users)
             }
         }
     except Exception as e:
