@@ -1861,21 +1861,30 @@ async def get_all_users(
         users = list(users_collection.find(query).skip(skip).limit(limit))
         total = users_collection.count_documents(query)
         
+        # Batch fetch all plans
+        plans_list = list(plans_collection.find({}))
+        plans_map = {str(plan["_id"]): plan for plan in plans_list}
+        plans_by_name = {plan["name"]: plan for plan in plans_list}
+        
         # Remove passwords and convert plan IDs to names
         for user in users:
             user.pop("password", None)
             
             # Convert currentPlan ObjectId to plan name
             if user.get("currentPlan"):
-                try:
-                    plan = plans_collection.find_one({"_id": ObjectId(user["currentPlan"])})
+                # Try ObjectId lookup
+                plan = plans_map.get(user.get("currentPlan"))
+                if plan:
+                    user["currentPlan"] = plan.get("name")
+                else:
+                    # Try by name
+                    plan = plans_by_name.get(user.get("currentPlan"))
                     if plan:
                         user["currentPlan"] = plan.get("name")
+                    elif isinstance(user.get("currentPlan"), str) and len(user.get("currentPlan")) < 50:
+                        # Keep as is if it's a valid string
+                        pass
                     else:
-                        user["currentPlan"] = None
-                except:
-                    # If currentPlan is already a string or invalid, keep it or set to None
-                    if not isinstance(user["currentPlan"], str) or len(user["currentPlan"]) > 50:
                         user["currentPlan"] = None
         
         return {
