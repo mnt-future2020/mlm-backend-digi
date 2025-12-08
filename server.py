@@ -1718,9 +1718,6 @@ async def get_dashboard_reports(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-
-    }
-
 @app.get("/api/health")
 async def health_check():
     """Health check endpoint"""
