@@ -417,6 +417,26 @@ async def register(user: UserRegister):
                 "level": 1,
                 "createdAt": datetime.utcnow()
             })
+            
+            # Give referral income if plan is assigned
+            if plan:
+                referral_income = plan.get("referralIncome", 0)
+                if referral_income > 0:
+                    # Update sponsor wallet
+                    wallets_collection.update_one(
+                        {"userId": str(sponsor["_id"])},
+                        {"$inc": {"balance": referral_income, "totalEarnings": referral_income}}
+                    )
+                    
+                    # Create transaction for sponsor
+                    transactions_collection.insert_one({
+                        "userId": str(sponsor["_id"]),
+                        "type": "REFERRAL_INCOME",
+                        "amount": referral_income,
+                        "description": f"Referral income from {user.name} plan activation",
+                        "status": "COMPLETED",
+                        "createdAt": datetime.utcnow()
+                    })
         
         # Create access token
         access_token = create_access_token(data={"sub": user.username, "userId": user_id})
