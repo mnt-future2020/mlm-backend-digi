@@ -822,6 +822,92 @@ async def get_team_tree(current_user: dict = Depends(get_current_active_user)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/api/user/details/{user_id}")
+async def get_user_details(user_id: str, current_user: dict = Depends(get_current_active_user)):
+    """Get detailed user information"""
+    try:
+        # Find user by either MongoDB _id or referralId
+        user = users_collection.find_one({"$or": [{"_id": ObjectId(user_id)}, {"referralId": user_id}]})
+        
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Get plan details
+        plan_details = None
+        if user.get("currentPlan"):
+            try:
+                plan = plans_collection.find_one({"_id": ObjectId(user["currentPlan"])})
+                if plan:
+                    plan_details = {
+                        "name": plan.get("name"),
+                        "amount": plan.get("amount"),
+                        "pv": plan.get("pv"),
+                        "dailyCapping": plan.get("dailyCapping")
+                    }
+            except:
+                pass
+        
+        # Get wallet info
+        wallet = wallets_collection.find_one({"userId": str(user["_id"])})
+        wallet_data = {
+            "balance": wallet.get("balance", 0) if wallet else 0,
+            "totalEarnings": wallet.get("totalEarnings", 0) if wallet else 0,
+            "totalWithdrawals": wallet.get("totalWithdrawals", 0) if wallet else 0
+        }
+        
+        # Get sponsor info
+        sponsor_info = None
+        if user.get("sponsorId") and user.get("sponsorId") != user.get("referralId"):
+            sponsor = users_collection.find_one({"referralId": user["sponsorId"]})
+            if sponsor:
+                sponsor_info = {
+                    "name": sponsor.get("name"),
+                    "referralId": sponsor.get("referralId")
+                }
+        
+        # Get team count
+        team_count = teams_collection.count_documents({"sponsorId": str(user["_id"])})
+        left_count = teams_collection.count_documents({"sponsorId": str(user["_id"]), "placement": "LEFT"})
+        right_count = teams_collection.count_documents({"sponsorId": str(user["_id"]), "placement": "RIGHT"})
+        
+        # Build response
+        user_details = {
+            "id": str(user["_id"]),
+            "name": user.get("name"),
+            "username": user.get("username"),
+            "email": user.get("email"),
+            "mobile": user.get("mobile"),
+            "referralId": user.get("referralId"),
+            "sponsorId": user.get("sponsorId"),
+            "sponsor": sponsor_info,
+            "isActive": user.get("isActive", False),
+            "currentPlan": plan_details,
+            "wallet": wallet_data,
+            "pv": {
+                "leftPV": user.get("leftPV", 0),
+                "rightPV": user.get("rightPV", 0),
+                "totalPV": user.get("totalPV", 0),
+                "dailyPVUsed": user.get("dailyPVUsed", 0)
+            },
+            "team": {
+                "total": team_count,
+                "left": left_count,
+                "right": right_count
+            },
+            "joinedAt": user.get("createdAt"),
+            "lastActive": user.get("updatedAt")
+        }
+        
+        return {
+            "success": True,
+            "data": user_details
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/api/user/team/list")
 async def get_team_list(current_user: dict = Depends(get_current_active_user)):
     """Get user's team list"""
