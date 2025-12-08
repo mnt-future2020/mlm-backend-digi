@@ -2236,9 +2236,15 @@ async def get_dashboard_reports(
 ):
     """Get dashboard analytics and reports"""
     try:
-        # Total users count
-        total_users = users_collection.count_documents({"role": "user"})
-        active_users = users_collection.count_documents({"role": "user", "isActive": True})
+        # Total users count (including all users - admin + regular users)
+        total_users = users_collection.count_documents({})
+        active_users = users_collection.count_documents({"isActive": True})
+        inactive_users = users_collection.count_documents({"isActive": False})
+        
+        # Users with plans
+        with_plans = users_collection.count_documents({
+            "currentPlan": {"$exists": True, "$ne": None, "$ne": ""}
+        })
         
         # Total earnings (sum of all credit transactions)
         total_earnings_pipeline = [
