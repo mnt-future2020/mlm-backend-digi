@@ -295,7 +295,7 @@ def initialize_admin():
             "isActive": True,
             "isEmailVerified": True,
             "placement": None,
-            "sponsorId": None,
+            "sponsorId": admin_referral_id,  # Self-reference for root user
             "currentPlan": None,
             "totalPV": 0,
             "leftPV": 0,
