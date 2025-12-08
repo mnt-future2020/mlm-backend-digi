@@ -772,12 +772,19 @@ async def get_team_tree(current_user: dict = Depends(get_current_active_user)):
                 "placement": "RIGHT"
             })
             
+            # Get plan name if exists
+            plan_name = None
+            if user.get("currentPlan"):
+                plan = plans_collection.find_one({"_id": ObjectId(user["currentPlan"])}, {"_id": 0})
+                if plan:
+                    plan_name = plan.get("name")
+            
             node = {
                 "id": str(user["_id"]),
                 "name": user["name"],
                 "referralId": user["referralId"],
                 "placement": user.get("placement"),
-                "currentPlan": user.get("currentPlan"),
+                "currentPlan": plan_name,
                 "isActive": user.get("isActive", False),
                 "leftPV": user.get("leftPV", 0),
                 "rightPV": user.get("rightPV", 0),
