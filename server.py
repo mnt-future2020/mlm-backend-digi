@@ -779,7 +779,7 @@ async def get_team_tree(current_user: dict = Depends(get_current_active_user)):
                     plan = plans_collection.find_one({"_id": ObjectId(user["currentPlan"])}, {"_id": 0})
                     if plan:
                         plan_name = plan.get("name")
-                except:
+                except Exception:
                     # If currentPlan is already a string (plan name), use it
                     plan_name = user.get("currentPlan") if isinstance(user.get("currentPlan"), str) and len(user.get("currentPlan")) < 50 else None
             
@@ -957,7 +957,7 @@ async def get_admin_team_tree(
                     plan = plans_collection.find_one({"_id": ObjectId(user["currentPlan"])}, {"_id": 0})
                     if plan:
                         plan_name = plan.get("name")
-                except:
+                except Exception:
                     # If currentPlan is already a string (plan name), use it
                     plan_name = user.get("currentPlan") if isinstance(user.get("currentPlan"), str) and len(user.get("currentPlan")) < 50 else None
             
