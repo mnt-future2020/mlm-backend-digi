@@ -1142,22 +1142,45 @@ async def get_all_teams(
         
         teams = list(teams_collection.find(query))
         
+        if not teams:
+            return {
+                "success": True,
+                "data": {"members": [], "stats": {"totalMembers": 0, "leftCount": 0, "rightCount": 0}}
+            }
+        
+        # Batch fetch all users and sponsors
+        user_ids = [ObjectId(team["userId"]) for team in teams]
+        sponsor_ids = [ObjectId(team["sponsorId"]) for team in teams]
+        all_user_ids = list(set(user_ids + sponsor_ids))
+        
+        users_list = list(users_collection.find({"_id": {"$in": all_user_ids}}))
+        users_map = {str(user["_id"]): user for user in users_list}
+        
+        # Batch fetch all plans
+        plans_list = list(plans_collection.find({}))
+        plans_map = {str(plan["_id"]): plan for plan in plans_list}
+        plans_by_name = {plan["name"]: plan for plan in plans_list}
+        
         result = []
         for team in teams:
-            user = users_collection.find_one({"_id": ObjectId(team["userId"])})
-            sponsor = users_collection.find_one({"_id": ObjectId(team["sponsorId"])})
+            user = users_map.get(team["userId"])
+            sponsor = users_map.get(team["sponsorId"])
             
             if user:
                 # Get plan name if exists
                 plan_name = None
                 if user.get("currentPlan"):
-                    try:
-                        plan = plans_collection.find_one({"_id": ObjectId(user["currentPlan"])}, {"_id": 0})
+                    # Try ObjectId lookup first
+                    plan = plans_map.get(user.get("currentPlan"))
+                    if plan:
+                        plan_name = plan.get("name")
+                    else:
+                        # Try by name
+                        plan = plans_by_name.get(user.get("currentPlan"))
                         if plan:
                             plan_name = plan.get("name")
-                    except Exception:
-                        # If currentPlan is already a string (plan name), use it
-                        plan_name = user.get("currentPlan") if isinstance(user.get("currentPlan"), str) and len(user.get("currentPlan")) < 50 else None
+                        elif isinstance(user.get("currentPlan"), str) and len(user.get("currentPlan")) < 50:
+                            plan_name = user.get("currentPlan")
                 
                 member_data = {
                     "id": str(user["_id"]),
