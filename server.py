@@ -2621,19 +2621,37 @@ async def get_all_users_report(
         
         users = list(users_collection.find(query, {"password": 0}))
         
+        if not users:
+            return {"success": True, "data": [], "total": 0}
+        
+        # Batch fetch plans
+        plans_list = list(plans_collection.find({}))
+        plans_map = {str(plan["_id"]): plan for plan in plans_list}
+        plans_by_name = {plan["name"]: plan for plan in plans_list}
+        
+        # Batch fetch wallets
+        user_ids = [str(user["_id"]) for user in users]
+        wallets_list = list(wallets_collection.find({"userId": {"$in": user_ids}}))
+        wallets_map = {wallet["userId"]: wallet for wallet in wallets_list}
+        
         # Format data
         report_data = []
         for user in users:
             plan_name = "No Plan"
             if user.get("currentPlan"):
-                try:
-                    plan = plans_collection.find_one({"_id": ObjectId(user["currentPlan"])})
+                # Try ObjectId lookup
+                plan = plans_map.get(user.get("currentPlan"))
+                if plan:
+                    plan_name = plan.get("name", "No Plan")
+                else:
+                    # Try by name
+                    plan = plans_by_name.get(user.get("currentPlan"))
                     if plan:
                         plan_name = plan.get("name", "No Plan")
-                except:
-                    pass
+                    elif isinstance(user.get("currentPlan"), str):
+                        plan_name = user.get("currentPlan")
             
-            wallet = wallets_collection.find_one({"userId": str(user["_id"])})
+            wallet = wallets_map.get(str(user["_id"]))
             balance = wallet.get("balance", 0) if wallet else 0
             
             report_data.append({
