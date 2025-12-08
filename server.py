@@ -365,6 +365,13 @@ async def register(user: UserRegister):
         # Generate unique referral ID
         referral_id = generate_referral_id()
         
+        # Check if plan is provided and valid
+        plan = None
+        if user.planId:
+            plan = plans_collection.find_one({"_id": ObjectId(user.planId)})
+            if not plan:
+                raise HTTPException(status_code=400, detail="Invalid plan ID")
+        
         # Create user
         user_data = {
             "name": user.name,
@@ -378,7 +385,9 @@ async def register(user: UserRegister):
             "isEmailVerified": False,
             "placement": user.placement,
             "sponsorId": user.referralId,
-            "currentPlan": None,
+            "currentPlan": plan["name"] if plan else None,
+            "currentPlanId": user.planId if plan else None,
+            "activatedAt": datetime.utcnow() if plan else None,
             "totalPV": 0,
             "leftPV": 0,
             "rightPV": 0,
