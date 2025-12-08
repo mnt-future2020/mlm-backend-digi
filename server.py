@@ -1349,6 +1349,114 @@ async def update_user_status(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
+@app.put("/api/admin/users/{user_id}")
+async def update_user(
+    user_id: str,
+    data: dict = Body(...),
+    current_admin: dict = Depends(get_current_admin)
+):
+    """Update user information (admin only)"""
+    try:
+        user = users_collection.find_one({"_id": ObjectId(user_id)})
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        update_data = {}
+        if data.get("name"):
+            update_data["name"] = data["name"]
+        if data.get("email"):
+            # Check if email is already taken by another user
+            existing = users_collection.find_one({"email": data["email"], "_id": {"$ne": ObjectId(user_id)}})
+            if existing:
+                raise HTTPException(status_code=400, detail="Email already in use")
+            update_data["email"] = data["email"]
+        if data.get("mobile"):
+            update_data["mobile"] = data["mobile"]
+        
+        if update_data:
+            update_data["updatedAt"] = datetime.utcnow()
+            users_collection.update_one(
+                {"_id": ObjectId(user_id)},
+                {"$set": update_data}
+            )
+        
+        return {
+            "success": True,
+            "message": "User updated successfully"
+        }
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/api/admin/users/{user_id}/reset-password")
+async def reset_user_password(
+    user_id: str,
+    data: dict = Body(...),
+    current_admin: dict = Depends(get_current_admin)
+):
+    """Reset user password (admin only)"""
+    try:
+        user = users_collection.find_one({"_id": ObjectId(user_id)})
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        new_password = data.get("newPassword")
+        if not new_password or len(new_password) < 6:
+            raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+        
+        hashed_password = hash_password(new_password)
+        users_collection.update_one(
+            {"_id": ObjectId(user_id)},
+            {"$set": {"password": hashed_password, "updatedAt": datetime.utcnow()}}
+        )
+        
+        return {
+            "success": True,
+            "message": "Password reset successfully"
+        }
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/admin/users/{user_id}")
+async def delete_user(
+    user_id: str,
+    current_admin: dict = Depends(get_current_admin)
+):
+    """Delete user (admin only)"""
+    try:
+        user = users_collection.find_one({"_id": ObjectId(user_id)})
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Delete user's wallet
+        wallets_collection.delete_one({"userId": user_id})
+        
+        # Delete user's transactions
+        transactions_collection.delete_many({"userId": user_id})
+        
+        # Delete user's team entries
+        teams_collection.delete_many({"userId": user_id})
+        
+        # Delete user's withdrawals
+        withdrawals_collection.delete_many({"userId": user_id})
+        
+        # Delete user
+        users_collection.delete_one({"_id": ObjectId(user_id)})
+        
+        return {
+            "success": True,
+            "message": "User deleted successfully"
+        }
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/admin/withdrawals")
 async def get_all_withdrawals(
     current_admin: dict = Depends(get_current_admin),
