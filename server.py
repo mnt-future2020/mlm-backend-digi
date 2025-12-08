@@ -418,8 +418,14 @@ async def register(user: UserRegister):
                 "createdAt": datetime.utcnow()
             })
             
-            # Give referral income if plan is assigned
+            # Give referral income and distribute PV if plan is assigned
             if plan:
+                # Distribute PV upward in binary tree
+                pv_amount = plan.get("pv", 0)
+                if pv_amount > 0:
+                    distribute_pv_upward(user_id, pv_amount)
+                
+                # Give referral income
                 referral_income = plan.get("referralIncome", 0)
                 if referral_income > 0:
                     # Update sponsor wallet
