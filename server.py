@@ -547,10 +547,57 @@ async def logout():
 # ==================== USER ROUTES ====================
 
 @app.get("/api/user/profile")
-async def get_profile():
-    """Get user profile - placeholder for now"""
-    # In real implementation, extract userId from JWT token
-    return {"success": True, "data": {"role": "user"}}
+async def get_profile(current_user: dict = Depends(get_current_active_user)):
+    """Get user profile"""
+    try:
+        user_data = serialize_doc(current_user)
+        user_data.pop("password", None)
+        
+        # Get wallet info
+        wallet = wallets_collection.find_one({"userId": current_user["id"]})
+        if wallet:
+            user_data["wallet"] = serialize_doc(wallet)
+        
+        # Get team count
+        team_count = teams_collection.count_documents({"sponsorId": current_user["id"]})
+        user_data["teamSize"] = team_count
+        
+        # Get left and right team counts
+        left_count = teams_collection.count_documents({
+            "sponsorId": current_user["id"],
+            "placement": "LEFT"
+        })
+        right_count = teams_collection.count_documents({
+            "sponsorId": current_user["id"],
+            "placement": "RIGHT"
+        })
+        user_data["leftTeamSize"] = left_count
+        user_data["rightTeamSize"] = right_count
+        
+        return {"success": True, "data": user_data}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/api/user/profile")
+async def update_profile(
+    data: dict = Body(...),
+    current_user: dict = Depends(get_current_active_user)
+):
+    """Update user profile"""
+    try:
+        # Fields that can be updated
+        allowed_fields = ["name", "mobile", "email"]
+        update_data = {k: v for k, v in data.items() if k in allowed_fields}
+        update_data["updatedAt"] = datetime.utcnow()
+        
+        users_collection.update_one(
+            {"_id": ObjectId(current_user["id"])},
+            {"$set": update_data}
+        )
+        
+        return {"success": True, "message": "Profile updated successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/user/referral/{referral_id}")
 async def get_referral_info(referral_id: str):
@@ -570,6 +617,142 @@ async def get_referral_info(referral_id: str):
         }
     except HTTPException as he:
         raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/user/dashboard")
+async def get_user_dashboard(current_user: dict = Depends(get_current_active_user)):
+    """Get user dashboard statistics"""
+    try:
+        user_id = current_user["id"]
+        
+        # Get wallet
+        wallet = wallets_collection.find_one({"userId": user_id})
+        wallet_data = serialize_doc(wallet) if wallet else {
+            "balance": 0,
+            "totalEarnings": 0,
+            "totalWithdrawals": 0
+        }
+        
+        # Get team statistics
+        total_team = teams_collection.count_documents({"sponsorId": user_id})
+        left_team = teams_collection.count_documents({
+            "sponsorId": user_id,
+            "placement": "LEFT"
+        })
+        right_team = teams_collection.count_documents({
+            "sponsorId": user_id,
+            "placement": "RIGHT"
+        })
+        
+        # Get current plan
+        current_plan = None
+        if current_user.get("currentPlan"):
+            plan = plans_collection.find_one({"_id": ObjectId(current_user["currentPlan"])})
+            if plan:
+                current_plan = serialize_doc(plan)
+        
+        # Get recent transactions
+        transactions = list(transactions_collection.find(
+            {"userId": user_id}
+        ).sort("createdAt", DESCENDING).limit(5))
+        
+        return {
+            "success": True,
+            "data": {
+                "wallet": wallet_data,
+                "team": {
+                    "total": total_team,
+                    "left": left_team,
+                    "right": right_team
+                },
+                "currentPlan": current_plan,
+                "recentTransactions": serialize_doc(transactions)
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/user/team/tree")
+async def get_team_tree(current_user: dict = Depends(get_current_active_user)):
+    """Get user's team tree (binary structure)"""
+    try:
+        user_id = current_user["id"]
+        
+        def build_tree(parent_id, depth=0, max_depth=3):
+            if depth > max_depth:
+                return None
+            
+            user = users_collection.find_one({"_id": ObjectId(parent_id)})
+            if not user:
+                return None
+            
+            # Get children
+            left_child = teams_collection.find_one({
+                "sponsorId": parent_id,
+                "placement": "LEFT"
+            })
+            right_child = teams_collection.find_one({
+                "sponsorId": parent_id,
+                "placement": "RIGHT"
+            })
+            
+            node = {
+                "id": str(user["_id"]),
+                "name": user["name"],
+                "referralId": user["referralId"],
+                "placement": user.get("placement"),
+                "currentPlan": user.get("currentPlan"),
+                "isActive": user.get("isActive", False),
+                "left": None,
+                "right": None
+            }
+            
+            if left_child:
+                node["left"] = build_tree(left_child["userId"], depth + 1, max_depth)
+            
+            if right_child:
+                node["right"] = build_tree(right_child["userId"], depth + 1, max_depth)
+            
+            return node
+        
+        tree = build_tree(user_id)
+        
+        return {
+            "success": True,
+            "data": tree
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/user/team/list")
+async def get_team_list(current_user: dict = Depends(get_current_active_user)):
+    """Get user's team list"""
+    try:
+        user_id = current_user["id"]
+        
+        # Get all team members
+        team_members = list(teams_collection.find({"sponsorId": user_id}))
+        
+        result = []
+        for member in team_members:
+            user = users_collection.find_one({"_id": ObjectId(member["userId"])})
+            if user:
+                result.append({
+                    "id": str(user["_id"]),
+                    "name": user["name"],
+                    "referralId": user["referralId"],
+                    "mobile": user.get("mobile", ""),
+                    "placement": member.get("placement"),
+                    "currentPlan": user.get("currentPlan"),
+                    "isActive": user.get("isActive", False),
+                    "joinedAt": user.get("createdAt", datetime.utcnow()).isoformat()
+                })
+        
+        return {
+            "success": True,
+            "data": serialize_doc(result)
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
