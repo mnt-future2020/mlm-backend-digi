@@ -2511,6 +2511,235 @@ async def get_dashboard_reports(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+# ============ DOWNLOADABLE REPORTS ENDPOINTS ============
+
+# USER REPORTS
+
+@app.get("/api/admin/reports/users/all")
+async def get_all_users_report(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    format: str = "json",
+    current_admin: dict = Depends(get_current_admin)
+):
+    """Get all members report with optional date filter"""
+    try:
+        start, end = parse_date_range(start_date, end_date)
+        
+        query = {"role": "user"}
+        if start or end:
+            query["createdAt"] = {}
+            if start:
+                query["createdAt"]["$gte"] = start
+            if end:
+                query["createdAt"]["$lte"] = end
+        
+        users = list(users_collection.find(query, {"password": 0}))
+        
+        # Format data
+        report_data = []
+        for user in users:
+            plan_name = "No Plan"
+            if user.get("currentPlan"):
+                try:
+                    plan = plans_collection.find_one({"_id": ObjectId(user["currentPlan"])})
+                    if plan:
+                        plan_name = plan.get("name", "No Plan")
+                except:
+                    pass
+            
+            wallet = wallets_collection.find_one({"userId": str(user["_id"])})
+            balance = wallet.get("balance", 0) if wallet else 0
+            
+            report_data.append({
+                "Referral ID": user.get("referralId", ""),
+                "Name": user.get("name", ""),
+                "Email": user.get("email", ""),
+                "Mobile": user.get("mobile", ""),
+                "Sponsor ID": user.get("sponsorId", ""),
+                "Current Plan": plan_name,
+                "Status": "Active" if user.get("isActive", False) else "Inactive",
+                "Wallet Balance": f"₹{balance}",
+                "Joined Date": user.get("createdAt", datetime.now()).strftime("%d-%m-%Y") if user.get("createdAt") else ""
+            })
+        
+        if format == "excel":
+            headers = ["Referral ID", "Name", "Email", "Mobile", "Sponsor ID", "Current Plan", "Status", "Wallet Balance", "Joined Date"]
+            output = generate_excel_report(report_data, headers, "All Members Report")
+            return StreamingResponse(
+                output,
+                media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                headers={"Content-Disposition": f"attachment; filename=all_members_{datetime.now(IST).strftime('%Y%m%d_%H%M%S')}.xlsx"}
+            )
+        elif format == "pdf":
+            headers = ["Referral ID", "Name", "Email", "Current Plan", "Status", "Balance", "Joined"]
+            pdf_data = []
+            for item in report_data:
+                pdf_data.append({
+                    "Referral ID": item["Referral ID"],
+                    "Name": item["Name"],
+                    "Email": item["Email"],
+                    "Current Plan": item["Current Plan"],
+                    "Status": item["Status"],
+                    "Balance": item["Wallet Balance"],
+                    "Joined": item["Joined Date"]
+                })
+            output = generate_pdf_report(pdf_data, headers, "All Members Report")
+            return StreamingResponse(
+                output,
+                media_type="application/pdf",
+                headers={"Content-Disposition": f"attachment; filename=all_members_{datetime.now(IST).strftime('%Y%m%d_%H%M%S')}.pdf"}
+            )
+        else:
+            return {"success": True, "data": report_data, "total": len(report_data)}
+    
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/admin/reports/users/active-inactive")
+async def get_active_inactive_report(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    format: str = "json",
+    current_admin: dict = Depends(get_current_admin)
+):
+    """Get active/inactive users breakdown"""
+    try:
+        start, end = parse_date_range(start_date, end_date)
+        
+        base_query = {"role": "user"}
+        if start or end:
+            base_query["createdAt"] = {}
+            if start:
+                base_query["createdAt"]["$gte"] = start
+            if end:
+                base_query["createdAt"]["$lte"] = end
+        
+        # Get active users
+        active_query = {**base_query, "isActive": True}
+        active_users = list(users_collection.find(active_query, {"password": 0}))
+        
+        # Get inactive users
+        inactive_query = {**base_query, "isActive": False}
+        inactive_users = list(users_collection.find(inactive_query, {"password": 0}))
+        
+        report_data = []
+        
+        for user in active_users + inactive_users:
+            report_data.append({
+                "Referral ID": user.get("referralId", ""),
+                "Name": user.get("name", ""),
+                "Email": user.get("email", ""),
+                "Status": "Active" if user.get("isActive", False) else "Inactive",
+                "Joined Date": user.get("createdAt", datetime.now()).strftime("%d-%m-%Y") if user.get("createdAt") else ""
+            })
+        
+        if format == "excel":
+            headers = ["Referral ID", "Name", "Email", "Status", "Joined Date"]
+            output = generate_excel_report(report_data, headers, "Active/Inactive Users Report")
+            return StreamingResponse(
+                output,
+                media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                headers={"Content-Disposition": f"attachment; filename=active_inactive_users_{datetime.now(IST).strftime('%Y%m%d_%H%M%S')}.xlsx"}
+            )
+        elif format == "pdf":
+            headers = ["Referral ID", "Name", "Email", "Status", "Joined Date"]
+            output = generate_pdf_report(report_data, headers, "Active/Inactive Users Report")
+            return StreamingResponse(
+                output,
+                media_type="application/pdf",
+                headers={"Content-Disposition": f"attachment; filename=active_inactive_users_{datetime.now(IST).strftime('%Y%m%d_%H%M%S')}.pdf"}
+            )
+        else:
+            return {
+                "success": True,
+                "data": report_data,
+                "summary": {
+                    "total": len(report_data),
+                    "active": len(active_users),
+                    "inactive": len(inactive_users)
+                }
+            }
+    
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/admin/reports/users/by-plan")
+async def get_users_by_plan_report(
+    plan_id: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    format: str = "json",
+    current_admin: dict = Depends(get_current_admin)
+):
+    """Get users by plan type"""
+    try:
+        start, end = parse_date_range(start_date, end_date)
+        
+        query = {"role": "user"}
+        if start or end:
+            query["createdAt"] = {}
+            if start:
+                query["createdAt"]["$gte"] = start
+            if end:
+                query["createdAt"]["$lte"] = end
+        
+        if plan_id and plan_id != "all":
+            query["$or"] = [
+                {"currentPlan": plan_id},
+                {"currentPlan": ObjectId(plan_id) if len(plan_id) == 24 else plan_id}
+            ]
+        
+        users = list(users_collection.find(query, {"password": 0}))
+        
+        report_data = []
+        for user in users:
+            plan_name = "No Plan"
+            if user.get("currentPlan"):
+                try:
+                    plan = plans_collection.find_one({"_id": ObjectId(user["currentPlan"])})
+                    if plan:
+                        plan_name = plan.get("name", "No Plan")
+                except:
+                    pass
+            
+            report_data.append({
+                "Referral ID": user.get("referralId", ""),
+                "Name": user.get("name", ""),
+                "Email": user.get("email", ""),
+                "Plan": plan_name,
+                "Status": "Active" if user.get("isActive", False) else "Inactive",
+                "Joined Date": user.get("createdAt", datetime.now()).strftime("%d-%m-%Y") if user.get("createdAt") else ""
+            })
+        
+        if format == "excel":
+            headers = ["Referral ID", "Name", "Email", "Plan", "Status", "Joined Date"]
+            output = generate_excel_report(report_data, headers, "Users by Plan Report")
+            return StreamingResponse(
+                output,
+                media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                headers={"Content-Disposition": f"attachment; filename=users_by_plan_{datetime.now(IST).strftime('%Y%m%d_%H%M%S')}.xlsx"}
+            )
+        elif format == "pdf":
+            headers = ["Referral ID", "Name", "Email", "Plan", "Status", "Joined Date"]
+            output = generate_pdf_report(report_data, headers, "Users by Plan Report")
+            return StreamingResponse(
+                output,
+                media_type="application/pdf",
+                headers={"Content-Disposition": f"attachment; filename=users_by_plan_{datetime.now(IST).strftime('%Y%m%d_%H%M%S')}.pdf"}
+            )
+        else:
+            return {"success": True, "data": report_data, "total": len(report_data)}
+    
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/api/health")
 async def health_check():
     """Health check endpoint"""
