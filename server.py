@@ -1434,6 +1434,7 @@ async def root():
         "message": "VSV Unite MLM API",
         "version": "1.0.0",
         "status": "running"
+    }
 
 # ============ TOPUP/PLAN ACTIVATION MANAGEMENT (ADMIN) ============
 
