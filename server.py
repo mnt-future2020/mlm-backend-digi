@@ -3473,6 +3473,152 @@ async def get_growth_statistics(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/api/admin/calculate-daily-matching")
+async def calculate_daily_matching_income(current_admin: dict = Depends(get_current_admin)):
+    """
+    Calculate matching income for all users at end of day
+    This should be called once per day (manually or via cron job)
+    """
+    try:
+        # Get all users with active plans
+        users = list(users_collection.find({
+            "role": "user",
+            "isActive": True,
+            "currentPlan": {"$ne": None}
+        }))
+        
+        total_processed = 0
+        total_income_paid = 0
+        results = []
+        
+        for user in users:
+            user_id = str(user["_id"])
+            left_pv = user.get("leftPV", 0)
+            right_pv = user.get("rightPV", 0)
+            
+            # Skip if no PV on either side
+            if left_pv == 0 or right_pv == 0:
+                continue
+            
+            # Calculate matching income
+            try:
+                # Get plan details
+                plan_id = user.get("currentPlanId")
+                if not plan_id:
+                    # Try to get by name
+                    plan_name = user.get("currentPlan")
+                    plan = plans_collection.find_one({"name": plan_name})
+                else:
+                    plan = plans_collection.find_one({"_id": ObjectId(plan_id)})
+                
+                if not plan:
+                    continue
+                
+                daily_capping = plan.get("dailyCapping", 500)
+                matching_income_rate = 25  # ₹25 per PV
+                
+                # Calculate matching PV
+                matched_pv = min(left_pv, right_pv)
+                
+                # Check daily capping
+                today_date = datetime.now(IST).replace(hour=0, minute=0, second=0, microsecond=0)
+                last_matching_date = user.get("lastMatchingDate")
+                
+                # Reset daily PV if new day
+                if not last_matching_date or last_matching_date.replace(hour=0, minute=0, second=0, microsecond=0) != today_date:
+                    daily_pv_used = 0
+                else:
+                    daily_pv_used = user.get("dailyPVUsed", 0)
+                
+                # Calculate maximum PV allowed today
+                max_pv_per_day = daily_capping // matching_income_rate
+                remaining_pv_today = max_pv_per_day - daily_pv_used
+                
+                if remaining_pv_today <= 0:
+                    continue  # Daily limit reached
+                
+                # Today's PV = min(matched_pv, remaining_pv_today)
+                today_pv = min(matched_pv, remaining_pv_today)
+                
+                if today_pv <= 0:
+                    continue
+                
+                # Calculate income
+                income = today_pv * matching_income_rate
+                
+                # Update wallet
+                wallets_collection.update_one(
+                    {"userId": user_id},
+                    {
+                        "$inc": {
+                            "balance": income,
+                            "totalEarnings": income
+                        },
+                        "$set": {"updatedAt": datetime.now(IST)}
+                    }
+                )
+                
+                # Create transaction
+                transactions_collection.insert_one({
+                    "userId": user_id,
+                    "type": "MATCHING_INCOME",
+                    "amount": income,
+                    "description": f"Daily binary matching income - {today_pv} PV @ ₹{matching_income_rate}/PV",
+                    "pv": today_pv,
+                    "status": "COMPLETED",
+                    "createdAt": datetime.now(IST)
+                })
+                
+                # Flush matched PV from both sides
+                users_collection.update_one(
+                    {"_id": user["_id"]},
+                    {
+                        "$inc": {
+                            "leftPV": -today_pv,
+                            "rightPV": -today_pv,
+                            "totalPV": today_pv
+                        },
+                        "$set": {
+                            "lastMatchingDate": today_date,
+                            "dailyPVUsed": daily_pv_used + today_pv,
+                            "updatedAt": datetime.now(IST)
+                        }
+                    }
+                )
+                
+                total_processed += 1
+                total_income_paid += income
+                
+                results.append({
+                    "userId": user_id,
+                    "name": user.get("name"),
+                    "referralId": user.get("referralId"),
+                    "matchedPV": today_pv,
+                    "income": income,
+                    "leftPV_before": left_pv,
+                    "rightPV_before": right_pv,
+                    "leftPV_after": left_pv - today_pv,
+                    "rightPV_after": right_pv - today_pv
+                })
+                
+            except Exception as e:
+                print(f"Error processing user {user_id}: {str(e)}")
+                continue
+        
+        return {
+            "success": True,
+            "message": "Daily matching income calculated successfully",
+            "summary": {
+                "totalUsersProcessed": total_processed,
+                "totalIncomePaid": total_income_paid,
+                "date": datetime.now(IST).strftime("%Y-%m-%d")
+            },
+            "details": results
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/api/health")
 async def health_check():
     """Health check endpoint"""
