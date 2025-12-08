@@ -1512,7 +1512,8 @@ async def get_all_users(
 ):
     """Get all users (admin only)"""
     try:
-        query = {"role": "user"}
+        # Include all users (both admin and user roles)
+        query = {}
         
         if search:
             query["$or"] = [
