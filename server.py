@@ -599,6 +599,43 @@ async def update_profile(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/api/user/change-password")
+async def change_password(
+    data: dict = Body(...),
+    current_user: dict = Depends(get_current_active_user)
+):
+    """Change user password"""
+    try:
+        old_password = data.get("oldPassword")
+        new_password = data.get("newPassword")
+        
+        if not old_password or not new_password:
+            raise HTTPException(status_code=400, detail="Old and new password required")
+        
+        # Get user from database
+        user = users_collection.find_one({"_id": ObjectId(current_user["id"])})
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Verify old password
+        if not verify_password(old_password, user["password"]):
+            raise HTTPException(status_code=400, detail="Incorrect old password")
+        
+        # Update password
+        users_collection.update_one(
+            {"_id": ObjectId(current_user["id"])},
+            {"$set": {
+                "password": hash_password(new_password),
+                "updatedAt": datetime.utcnow()
+            }}
+        )
+        
+        return {"success": True, "message": "Password changed successfully"}
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/api/user/referral/{referral_id}")
 async def get_referral_info(referral_id: str):
     """Get referral user information"""
