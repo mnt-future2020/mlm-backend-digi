@@ -1667,9 +1667,22 @@ async def get_all_users(
         users = list(users_collection.find(query).skip(skip).limit(limit))
         total = users_collection.count_documents(query)
         
-        # Remove passwords
+        # Remove passwords and convert plan IDs to names
         for user in users:
             user.pop("password", None)
+            
+            # Convert currentPlan ObjectId to plan name
+            if user.get("currentPlan"):
+                try:
+                    plan = plans_collection.find_one({"_id": ObjectId(user["currentPlan"])})
+                    if plan:
+                        user["currentPlan"] = plan.get("name")
+                    else:
+                        user["currentPlan"] = None
+                except:
+                    # If currentPlan is already a string or invalid, keep it or set to None
+                    if not isinstance(user["currentPlan"], str) or len(user["currentPlan"]) > 50:
+                        user["currentPlan"] = None
         
         return {
             "success": True,
