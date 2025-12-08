@@ -1731,6 +1731,17 @@ async def update_user(
             update_data["email"] = data["email"]
         if data.get("mobile"):
             update_data["mobile"] = data["mobile"]
+        if "currentPlan" in data:
+            # Handle plan assignment/change
+            if data["currentPlan"]:
+                # Find plan by name
+                plan = plans_collection.find_one({"name": data["currentPlan"]})
+                if plan:
+                    update_data["currentPlan"] = str(plan["_id"])
+                else:
+                    update_data["currentPlan"] = data["currentPlan"]
+            else:
+                update_data["currentPlan"] = None
         
         if update_data:
             update_data["updatedAt"] = datetime.utcnow()
