@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, EmailStr, Field, field_validator
 from typing import Optional, List, Dict, Any
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from pymongo import MongoClient, ASCENDING, DESCENDING
@@ -13,6 +13,10 @@ from dotenv import load_dotenv
 import random
 import string
 import re
+import pytz
+
+# Indian Standard Time timezone
+IST = pytz.timezone('Asia/Kolkata')
 
 # Load environment variables
 load_dotenv()
