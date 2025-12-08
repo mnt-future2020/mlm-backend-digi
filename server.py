@@ -770,6 +770,207 @@ async def get_plans():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/api/plans/activate")
+async def activate_plan(
+    data: dict = Body(...),
+    current_user: dict = Depends(get_current_active_user)
+):
+    """Activate a plan for user"""
+    try:
+        plan_id = data.get("planId")
+        if not plan_id:
+            raise HTTPException(status_code=400, detail="Plan ID required")
+        
+        # Get plan
+        plan = plans_collection.find_one({"_id": ObjectId(plan_id)})
+        if not plan:
+            raise HTTPException(status_code=404, detail="Plan not found")
+        
+        user_id = current_user["id"]
+        
+        # Update user's current plan
+        users_collection.update_one(
+            {"_id": ObjectId(user_id)},
+            {
+                "$set": {
+                    "currentPlan": str(plan["_id"]),
+                    "totalPV": plan["pv"],
+                    "updatedAt": datetime.utcnow()
+                }
+            }
+        )
+        
+        # Create transaction
+        transactions_collection.insert_one({
+            "userId": user_id,
+            "type": "PLAN_ACTIVATION",
+            "amount": plan["amount"],
+            "description": f"Activated {plan['name']} plan",
+            "status": "COMPLETED",
+            "createdAt": datetime.utcnow()
+        })
+        
+        # Add referral income to sponsor if exists
+        if current_user.get("sponsorId"):
+            sponsor = users_collection.find_one({"referralId": current_user["sponsorId"]})
+            if sponsor:
+                sponsor_id = str(sponsor["_id"])
+                
+                # Update sponsor wallet
+                wallets_collection.update_one(
+                    {"userId": sponsor_id},
+                    {
+                        "$inc": {
+                            "balance": plan["referralIncome"],
+                            "totalEarnings": plan["referralIncome"]
+                        },
+                        "$set": {"updatedAt": datetime.utcnow()}
+                    }
+                )
+                
+                # Create transaction for sponsor
+                transactions_collection.insert_one({
+                    "userId": sponsor_id,
+                    "type": "REFERRAL_INCOME",
+                    "amount": plan["referralIncome"],
+                    "description": f"Referral income from {current_user['name']}",
+                    "status": "COMPLETED",
+                    "fromUser": user_id,
+                    "createdAt": datetime.utcnow()
+                })
+        
+        return {
+            "success": True,
+            "message": "Plan activated successfully"
+        }
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ==================== WALLET & TRANSACTIONS ====================
+
+@app.get("/api/wallet/balance")
+async def get_wallet_balance(current_user: dict = Depends(get_current_active_user)):
+    """Get wallet balance"""
+    try:
+        wallet = wallets_collection.find_one({"userId": current_user["id"]})
+        if not wallet:
+            return {
+                "success": True,
+                "data": {
+                    "balance": 0,
+                    "totalEarnings": 0,
+                    "totalWithdrawals": 0
+                }
+            }
+        
+        return {
+            "success": True,
+            "data": serialize_doc(wallet)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/wallet/transactions")
+async def get_transactions(
+    current_user: dict = Depends(get_current_active_user),
+    limit: int = 50,
+    skip: int = 0
+):
+    """Get user transactions"""
+    try:
+        transactions = list(transactions_collection.find(
+            {"userId": current_user["id"]}
+        ).sort("createdAt", DESCENDING).skip(skip).limit(limit))
+        
+        total = transactions_collection.count_documents({"userId": current_user["id"]})
+        
+        return {
+            "success": True,
+            "data": serialize_doc(transactions),
+            "total": total,
+            "limit": limit,
+            "skip": skip
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ==================== WITHDRAWAL ====================
+
+@app.post("/api/withdrawal/request")
+async def create_withdrawal_request(
+    data: dict = Body(...),
+    current_user: dict = Depends(get_current_active_user)
+):
+    """Create withdrawal request"""
+    try:
+        amount = data.get("amount")
+        bank_details = data.get("bankDetails", {})
+        
+        if not amount or amount <= 0:
+            raise HTTPException(status_code=400, detail="Invalid amount")
+        
+        # Check wallet balance
+        wallet = wallets_collection.find_one({"userId": current_user["id"]})
+        if not wallet or wallet.get("balance", 0) < amount:
+            raise HTTPException(status_code=400, detail="Insufficient balance")
+        
+        # Create withdrawal request
+        withdrawal = {
+            "userId": current_user["id"],
+            "amount": amount,
+            "bankDetails": bank_details,
+            "status": "PENDING",
+            "requestedAt": datetime.utcnow(),
+            "processedAt": None,
+            "processedBy": None
+        }
+        
+        result = withdrawals_collection.insert_one(withdrawal)
+        
+        # Deduct from balance (hold)
+        wallets_collection.update_one(
+            {"userId": current_user["id"]},
+            {"$inc": {"balance": -amount}}
+        )
+        
+        # Create transaction
+        transactions_collection.insert_one({
+            "userId": current_user["id"],
+            "type": "WITHDRAWAL_REQUEST",
+            "amount": -amount,
+            "description": "Withdrawal request created",
+            "status": "PENDING",
+            "withdrawalId": str(result.inserted_id),
+            "createdAt": datetime.utcnow()
+        })
+        
+        return {
+            "success": True,
+            "message": "Withdrawal request created successfully",
+            "withdrawalId": str(result.inserted_id)
+        }
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/withdrawal/history")
+async def get_withdrawal_history(current_user: dict = Depends(get_current_active_user)):
+    """Get withdrawal history"""
+    try:
+        withdrawals = list(withdrawals_collection.find(
+            {"userId": current_user["id"]}
+        ).sort("requestedAt", DESCENDING))
+        
+        return {
+            "success": True,
+            "data": serialize_doc(withdrawals)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 # ==================== SETTINGS ROUTES ====================
 
 @app.get("/api/settings/public")
