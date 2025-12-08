@@ -2302,17 +2302,30 @@ async def get_all_topups(
         
         topups = list(topups_collection.find(query).sort("requestedAt", DESCENDING))
         
+        if not topups:
+            return {"success": True, "data": []}
+        
+        # Batch fetch users
+        user_ids = [ObjectId(t["userId"]) for t in topups if t.get("userId")]
+        users_list = list(users_collection.find({"_id": {"$in": user_ids}})) if user_ids else []
+        users_map = {str(user["_id"]): user for user in users_list}
+        
+        # Batch fetch plans
+        plan_ids = [ObjectId(t["planId"]) for t in topups if t.get("planId")]
+        plans_list = list(plans_collection.find({"_id": {"$in": plan_ids}})) if plan_ids else []
+        plans_map = {str(plan["_id"]): plan for plan in plans_list}
+        
         # Enrich with user and plan details
         for topup in topups:
             if topup.get("userId"):
-                user = users_collection.find_one({"_id": ObjectId(topup["userId"])})
+                user = users_map.get(topup["userId"])
                 if user:
                     topup["userName"] = user.get("name")
                     topup["userEmail"] = user.get("email")
                     topup["referralId"] = user.get("referralId")
             
             if topup.get("planId"):
-                plan = plans_collection.find_one({"_id": ObjectId(topup["planId"])})
+                plan = plans_map.get(topup["planId"])
                 if plan:
                     topup["planName"] = plan.get("name")
         
