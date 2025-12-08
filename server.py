@@ -830,9 +830,13 @@ async def get_team_list(current_user: dict = Depends(get_current_active_user)):
                 # Get plan name if exists
                 plan_name = None
                 if user.get("currentPlan"):
-                    plan = plans_collection.find_one({"_id": ObjectId(user["currentPlan"])}, {"_id": 0})
-                    if plan:
-                        plan_name = plan.get("name")
+                    try:
+                        plan = plans_collection.find_one({"_id": ObjectId(user["currentPlan"])}, {"_id": 0})
+                        if plan:
+                            plan_name = plan.get("name")
+                    except:
+                        # If currentPlan is already a string (plan name), use it
+                        plan_name = user.get("currentPlan") if isinstance(user.get("currentPlan"), str) and len(user.get("currentPlan")) < 50 else None
                 
                 result.append({
                     "id": str(user["_id"]),
