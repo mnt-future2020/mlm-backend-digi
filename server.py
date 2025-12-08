@@ -1082,6 +1082,312 @@ async def update_email_config(data: dict = Body(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+# ==================== ADMIN ROUTES ====================
+
+@app.get("/api/admin/dashboard")
+async def get_admin_dashboard(current_admin: dict = Depends(get_current_admin)):
+    """Get admin dashboard statistics"""
+    try:
+        # Total users
+        total_users = users_collection.count_documents({"role": "user"})
+        active_users = users_collection.count_documents({"role": "user", "isActive": True})
+        
+        # Total earnings (sum of all wallets)
+        pipeline = [
+            {"$group": {
+                "_id": None,
+                "totalEarnings": {"$sum": "$totalEarnings"},
+                "totalBalance": {"$sum": "$balance"},
+                "totalWithdrawals": {"$sum": "$totalWithdrawals"}
+            }}
+        ]
+        wallet_stats = list(wallets_collection.aggregate(pipeline))
+        wallet_data = wallet_stats[0] if wallet_stats else {
+            "totalEarnings": 0,
+            "totalBalance": 0,
+            "totalWithdrawals": 0
+        }
+        
+        # Pending withdrawals
+        pending_withdrawals = withdrawals_collection.count_documents({"status": "PENDING"})
+        
+        # Plan distribution
+        plan_distribution = {}
+        for plan in plans_collection.find({"isActive": True}):
+            count = users_collection.count_documents({"currentPlan": str(plan["_id"])})
+            plan_distribution[plan["name"]] = count
+        
+        # Recent users
+        recent_users = list(users_collection.find(
+            {"role": "user"}
+        ).sort("createdAt", DESCENDING).limit(5))
+        
+        return {
+            "success": True,
+            "data": {
+                "users": {
+                    "total": total_users,
+                    "active": active_users,
+                    "inactive": total_users - active_users
+                },
+                "earnings": wallet_data,
+                "pendingWithdrawals": pending_withdrawals,
+                "planDistribution": plan_distribution,
+                "recentUsers": serialize_doc(recent_users)
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/admin/users")
+async def get_all_users(
+    current_admin: dict = Depends(get_current_admin),
+    limit: int = 50,
+    skip: int = 0,
+    search: Optional[str] = None
+):
+    """Get all users (admin only)"""
+    try:
+        query = {"role": "user"}
+        
+        if search:
+            query["$or"] = [
+                {"name": {"$regex": search, "$options": "i"}},
+                {"email": {"$regex": search, "$options": "i"}},
+                {"referralId": {"$regex": search, "$options": "i"}},
+                {"mobile": {"$regex": search, "$options": "i"}}
+            ]
+        
+        users = list(users_collection.find(query).skip(skip).limit(limit))
+        total = users_collection.count_documents(query)
+        
+        # Remove passwords
+        for user in users:
+            user.pop("password", None)
+        
+        return {
+            "success": True,
+            "data": serialize_doc(users),
+            "total": total,
+            "limit": limit,
+            "skip": skip
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/api/admin/users/{user_id}/status")
+async def update_user_status(
+    user_id: str,
+    data: dict = Body(...),
+    current_admin: dict = Depends(get_current_admin)
+):
+    """Update user status (activate/deactivate)"""
+    try:
+        is_active = data.get("isActive")
+        if is_active is None:
+            raise HTTPException(status_code=400, detail="isActive field required")
+        
+        users_collection.update_one(
+            {"_id": ObjectId(user_id)},
+            {"$set": {"isActive": is_active, "updatedAt": datetime.utcnow()}}
+        )
+        
+        return {
+            "success": True,
+            "message": f"User {'activated' if is_active else 'deactivated'} successfully"
+        }
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/admin/withdrawals")
+async def get_all_withdrawals(
+    current_admin: dict = Depends(get_current_admin),
+    status: Optional[str] = None
+):
+    """Get all withdrawal requests"""
+    try:
+        query = {}
+        if status:
+            query["status"] = status.upper()
+        
+        withdrawals = list(withdrawals_collection.find(query).sort("requestedAt", DESCENDING))
+        
+        # Add user details
+        result = []
+        for withdrawal in withdrawals:
+            user = users_collection.find_one({"_id": ObjectId(withdrawal["userId"])})
+            withdrawal_data = serialize_doc(withdrawal)
+            if user:
+                withdrawal_data["userName"] = user["name"]
+                withdrawal_data["userEmail"] = user.get("email", "")
+                withdrawal_data["userMobile"] = user.get("mobile", "")
+            result.append(withdrawal_data)
+        
+        return {
+            "success": True,
+            "data": result
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/api/admin/withdrawals/{withdrawal_id}/approve")
+async def approve_withdrawal(
+    withdrawal_id: str,
+    current_admin: dict = Depends(get_current_admin)
+):
+    """Approve withdrawal request"""
+    try:
+        withdrawal = withdrawals_collection.find_one({"_id": ObjectId(withdrawal_id)})
+        if not withdrawal:
+            raise HTTPException(status_code=404, detail="Withdrawal not found")
+        
+        if withdrawal["status"] != "PENDING":
+            raise HTTPException(status_code=400, detail="Withdrawal already processed")
+        
+        # Update withdrawal status
+        withdrawals_collection.update_one(
+            {"_id": ObjectId(withdrawal_id)},
+            {
+                "$set": {
+                    "status": "APPROVED",
+                    "processedAt": datetime.utcnow(),
+                    "processedBy": current_admin["id"]
+                }
+            }
+        )
+        
+        # Update wallet
+        wallets_collection.update_one(
+            {"userId": withdrawal["userId"]},
+            {"$inc": {"totalWithdrawals": withdrawal["amount"]}}
+        )
+        
+        # Update transaction
+        transactions_collection.update_one(
+            {"withdrawalId": withdrawal_id},
+            {"$set": {"status": "COMPLETED"}}
+        )
+        
+        return {
+            "success": True,
+            "message": "Withdrawal approved successfully"
+        }
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/api/admin/withdrawals/{withdrawal_id}/reject")
+async def reject_withdrawal(
+    withdrawal_id: str,
+    data: dict = Body(...),
+    current_admin: dict = Depends(get_current_admin)
+):
+    """Reject withdrawal request"""
+    try:
+        withdrawal = withdrawals_collection.find_one({"_id": ObjectId(withdrawal_id)})
+        if not withdrawal:
+            raise HTTPException(status_code=404, detail="Withdrawal not found")
+        
+        if withdrawal["status"] != "PENDING":
+            raise HTTPException(status_code=400, detail="Withdrawal already processed")
+        
+        reason = data.get("reason", "No reason provided")
+        
+        # Update withdrawal status
+        withdrawals_collection.update_one(
+            {"_id": ObjectId(withdrawal_id)},
+            {
+                "$set": {
+                    "status": "REJECTED",
+                    "rejectionReason": reason,
+                    "processedAt": datetime.utcnow(),
+                    "processedBy": current_admin["id"]
+                }
+            }
+        )
+        
+        # Return amount to wallet
+        wallets_collection.update_one(
+            {"userId": withdrawal["userId"]},
+            {"$inc": {"balance": withdrawal["amount"]}}
+        )
+        
+        # Update transaction
+        transactions_collection.update_one(
+            {"withdrawalId": withdrawal_id},
+            {"$set": {"status": "REJECTED"}}
+        )
+        
+        return {
+            "success": True,
+            "message": "Withdrawal rejected successfully"
+        }
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/admin/plans")
+async def get_admin_plans(current_admin: dict = Depends(get_current_admin)):
+    """Get all plans (admin)"""
+    try:
+        plans = list(plans_collection.find({}))
+        return {
+            "success": True,
+            "data": serialize_doc(plans)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/admin/plans")
+async def create_plan(
+    data: dict = Body(...),
+    current_admin: dict = Depends(get_current_admin)
+):
+    """Create new plan"""
+    try:
+        plan_data = {
+            **data,
+            "isActive": data.get("isActive", True),
+            "createdAt": datetime.utcnow(),
+            "updatedAt": datetime.utcnow()
+        }
+        
+        result = plans_collection.insert_one(plan_data)
+        
+        return {
+            "success": True,
+            "message": "Plan created successfully",
+            "planId": str(result.inserted_id)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/api/admin/plans/{plan_id}")
+async def update_plan(
+    plan_id: str,
+    data: dict = Body(...),
+    current_admin: dict = Depends(get_current_admin)
+):
+    """Update plan"""
+    try:
+        data["updatedAt"] = datetime.utcnow()
+        
+        plans_collection.update_one(
+            {"_id": ObjectId(plan_id)},
+            {"$set": data}
+        )
+        
+        return {
+            "success": True,
+            "message": "Plan updated successfully"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 # ==================== HEALTH CHECK ====================
 
 @app.get("/")
