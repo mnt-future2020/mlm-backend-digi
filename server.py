@@ -972,7 +972,8 @@ async def activate_plan(
             {
                 "$set": {
                     "currentPlan": str(plan["_id"]),
-                    "totalPV": plan["pv"],
+                    "currentPlanName": plan["name"],
+                    "dailyPVLimit": plan.get("dailyCapping", 500) // 25,  # Daily PV limit
                     "updatedAt": datetime.utcnow()
                 }
             }
@@ -987,6 +988,11 @@ async def activate_plan(
             "status": "COMPLETED",
             "createdAt": datetime.utcnow()
         })
+        
+        # Distribute PV upward in the binary tree
+        pv_amount = plan.get("pv", 0)
+        if pv_amount > 0:
+            distribute_pv_upward(user_id, pv_amount)
         
         # Add referral income to sponsor if exists
         if current_user.get("sponsorId"):
