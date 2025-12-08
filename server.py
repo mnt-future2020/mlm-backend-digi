@@ -907,32 +907,45 @@ async def get_admin_team_tree(
 ):
     """Get team tree for any user (admin only)"""
     try:
-        def build_tree(user_id: str) -> dict:
-            user = users_collection.find_one({"_id": ObjectId(user_id)})
+        def build_tree(parent_id: str, depth=0, max_depth=5) -> dict:
+            if depth > max_depth:
+                return None
+                
+            user = users_collection.find_one({"_id": ObjectId(parent_id)})
             if not user:
                 return None
             
-            # Get left and right children
-            team = teams_collection.find_one({"parentId": user_id})
-            left_child = None
-            right_child = None
+            # Get left and right children from teams collection
+            left_child = teams_collection.find_one({
+                "sponsorId": str(user["_id"]),
+                "placement": "LEFT"
+            })
+            right_child = teams_collection.find_one({
+                "sponsorId": str(user["_id"]),
+                "placement": "RIGHT"
+            })
             
-            if team:
-                if team.get("leftChildId"):
-                    left_child = build_tree(team["leftChildId"])
-                if team.get("rightChildId"):
-                    right_child = build_tree(team["rightChildId"])
-            
-            return {
+            node = {
                 "id": str(user["_id"]),
                 "name": user["name"],
                 "referralId": user["referralId"],
-                "placement": team.get("placement") if team else None,
+                "placement": user.get("placement"),
                 "currentPlan": user.get("currentPlan"),
                 "isActive": user.get("isActive", False),
-                "left": left_child,
-                "right": right_child
+                "leftPV": user.get("leftPV", 0),
+                "rightPV": user.get("rightPV", 0),
+                "totalPV": user.get("totalPV", 0),
+                "left": None,
+                "right": None
             }
+            
+            if left_child:
+                node["left"] = build_tree(left_child["userId"], depth + 1, max_depth)
+            
+            if right_child:
+                node["right"] = build_tree(right_child["userId"], depth + 1, max_depth)
+            
+            return node
         
         tree = build_tree(user_id)
         
