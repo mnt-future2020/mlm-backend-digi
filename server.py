@@ -872,6 +872,13 @@ async def get_all_teams(
             sponsor = users_collection.find_one({"_id": ObjectId(team["sponsorId"])})
             
             if user:
+                # Get plan name if exists
+                plan_name = None
+                if user.get("currentPlan"):
+                    plan = plans_collection.find_one({"_id": ObjectId(user["currentPlan"])}, {"_id": 0})
+                    if plan:
+                        plan_name = plan.get("name")
+                
                 member_data = {
                     "id": str(user["_id"]),
                     "name": user["name"],
@@ -879,7 +886,7 @@ async def get_all_teams(
                     "mobile": user.get("mobile", ""),
                     "referralId": user["referralId"],
                     "placement": team.get("placement"),
-                    "currentPlan": user.get("currentPlan"),
+                    "currentPlan": plan_name,
                     "isActive": user.get("isActive", False),
                     "joinedAt": user.get("createdAt", datetime.utcnow()).isoformat(),
                     "sponsorName": sponsor["name"] if sponsor else "N/A",
