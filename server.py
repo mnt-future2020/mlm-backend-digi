@@ -1140,11 +1140,11 @@ def calculate_matching_income(user_id: str):
         matched_pv = min(left_pv, right_pv)
         
         # Check daily capping
-        today_date = datetime.utcnow().date()
+        today_date = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
         last_matching_date = user.get("lastMatchingDate")
         
         # Reset daily PV if new day
-        if not last_matching_date or last_matching_date != today_date:
+        if not last_matching_date or last_matching_date.replace(hour=0, minute=0, second=0, microsecond=0) != today_date:
             daily_pv_used = 0
         else:
             daily_pv_used = user.get("dailyPVUsed", 0)
