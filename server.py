@@ -1810,11 +1810,21 @@ async def get_admin_dashboard(current_admin: dict = Depends(get_current_admin)):
         # Pending withdrawals
         pending_withdrawals = withdrawals_collection.count_documents({"status": "PENDING"})
         
-        # Plan distribution
+        # Plan distribution - Use aggregation for efficiency
+        pipeline = [
+            {"$match": {"role": "user", "currentPlan": {"$ne": None, "$exists": True}}},
+            {"$group": {"_id": "$currentPlan", "count": {"$sum": 1}}}
+        ]
+        plan_counts = {result["_id"]: result["count"] for result in users_collection.aggregate(pipeline)}
+        
+        # Get plan names
         plan_distribution = {}
         for plan in plans_collection.find({"isActive": True}):
-            count = users_collection.count_documents({"currentPlan": str(plan["_id"])})
-            plan_distribution[plan["name"]] = count
+            plan_id = str(plan["_id"])
+            plan_name = plan["name"]
+            # Check both ObjectId and name (for legacy data)
+            count = plan_counts.get(plan_id, 0) + plan_counts.get(plan_name, 0)
+            plan_distribution[plan_name] = count
         
         # Recent users
         recent_users = list(users_collection.find(
