@@ -823,13 +823,20 @@ async def get_team_list(current_user: dict = Depends(get_current_active_user)):
         for member in team_members:
             user = users_collection.find_one({"_id": ObjectId(member["userId"])})
             if user:
+                # Get plan name if exists
+                plan_name = None
+                if user.get("currentPlan"):
+                    plan = plans_collection.find_one({"_id": ObjectId(user["currentPlan"])}, {"_id": 0})
+                    if plan:
+                        plan_name = plan.get("name")
+                
                 result.append({
                     "id": str(user["_id"]),
                     "name": user["name"],
                     "referralId": user["referralId"],
                     "mobile": user.get("mobile", ""),
                     "placement": member.get("placement"),
-                    "currentPlan": user.get("currentPlan"),
+                    "currentPlan": plan_name,
                     "isActive": user.get("isActive", False),
                     "joinedAt": user.get("createdAt", datetime.utcnow()).isoformat()
                 })
