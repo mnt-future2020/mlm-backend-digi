@@ -753,7 +753,7 @@ async def get_team_tree(current_user: dict = Depends(get_current_active_user)):
     try:
         user_id = current_user["id"]
         
-        def build_tree(parent_id, depth=0, max_depth=3):
+        def build_tree(parent_id, depth=0, max_depth=5):
             if depth > max_depth:
                 return None
             
@@ -761,13 +761,14 @@ async def get_team_tree(current_user: dict = Depends(get_current_active_user)):
             if not user:
                 return None
             
-            # Get children
+            # Get children from teams collection
+            # sponsorId in teams collection is stored as string of ObjectId
             left_child = teams_collection.find_one({
-                "sponsorId": parent_id,
+                "sponsorId": str(user["_id"]),
                 "placement": "LEFT"
             })
             right_child = teams_collection.find_one({
-                "sponsorId": parent_id,
+                "sponsorId": str(user["_id"]),
                 "placement": "RIGHT"
             })
             
@@ -778,6 +779,9 @@ async def get_team_tree(current_user: dict = Depends(get_current_active_user)):
                 "placement": user.get("placement"),
                 "currentPlan": user.get("currentPlan"),
                 "isActive": user.get("isActive", False),
+                "leftPV": user.get("leftPV", 0),
+                "rightPV": user.get("rightPV", 0),
+                "totalPV": user.get("totalPV", 0),
                 "left": None,
                 "right": None
             }
