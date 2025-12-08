@@ -2350,6 +2350,8 @@ async def get_dashboard_reports(
                 "overview": {
                     "totalUsers": total_users,
                     "activeUsers": active_users,
+                    "inactiveUsers": inactive_users,
+                    "withPlans": with_plans,
                     "totalEarnings": total_earnings,
                     "totalWithdrawals": total_withdrawals,
                     "pendingWithdrawals": pending_withdrawals,
