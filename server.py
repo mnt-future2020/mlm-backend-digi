@@ -154,6 +154,7 @@ class UserRegister(BaseModel):
     mobile: str
     referralId: Optional[str] = None
     placement: Optional[str] = None  # LEFT or RIGHT
+    planId: Optional[str] = None  # Optional plan assignment during registration
     
     @field_validator('placement')
     def validate_placement(cls, v):
