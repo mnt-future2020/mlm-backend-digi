@@ -1026,6 +1026,163 @@ async def activate_plan(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
+# ============ BINARY MLM PV DISTRIBUTION & MATCHING INCOME ============
+
+def distribute_pv_upward(user_id: str, pv_amount: int):
+    """
+    Distribute PV upward in the binary tree
+    PV flows completely to all sponsors based on placement
+    """
+    try:
+        current_user = users_collection.find_one({"_id": ObjectId(user_id)})
+        if not current_user:
+            return
+        
+        # Get user's team record to find placement
+        team_record = teams_collection.find_one({"userId": user_id})
+        if not team_record or not team_record.get("sponsorId"):
+            return  # No sponsor (admin user)
+        
+        placement = team_record.get("placement")  # LEFT or RIGHT
+        sponsor_id = team_record["sponsorId"]
+        
+        # Travel up the tree
+        while sponsor_id:
+            sponsor = users_collection.find_one({"_id": ObjectId(sponsor_id)})
+            if not sponsor:
+                break
+            
+            # Add PV to sponsor's left or right leg based on placement
+            update_field = "leftPV" if placement == "LEFT" else "rightPV"
+            
+            users_collection.update_one(
+                {"_id": ObjectId(sponsor_id)},
+                {
+                    "$inc": {update_field: pv_amount},
+                    "$set": {"updatedAt": datetime.utcnow()}
+                }
+            )
+            
+            # Calculate matching income for this sponsor
+            calculate_matching_income(sponsor_id)
+            
+            # Move up to next sponsor
+            sponsor_team = teams_collection.find_one({"userId": sponsor_id})
+            if not sponsor_team or not sponsor_team.get("sponsorId"):
+                break
+            
+            # Get placement of current sponsor in their sponsor's tree
+            placement = sponsor_team.get("placement")
+            sponsor_id = sponsor_team["sponsorId"]
+            
+    except Exception as e:
+        print(f"Error in PV distribution: {str(e)}")
+
+
+def calculate_matching_income(user_id: str):
+    """
+    Calculate binary matching income based on left and right PV
+    Formula: min(leftPV, rightPV) with daily capping
+    Amount = todayPV × ₹25
+    """
+    try:
+        user = users_collection.find_one({"_id": ObjectId(user_id)})
+        if not user or not user.get("currentPlan"):
+            return  # User must have an active plan
+        
+        # Get user's current PV
+        left_pv = user.get("leftPV", 0)
+        right_pv = user.get("rightPV", 0)
+        
+        # No matching possible if any side is 0
+        if left_pv == 0 or right_pv == 0:
+            return
+        
+        # Get plan details
+        plan = plans_collection.find_one({"_id": ObjectId(user["currentPlan"])})
+        if not plan:
+            return
+        
+        daily_capping = plan.get("dailyCapping", 500)
+        matching_income_rate = 25  # ₹25 per PV (as per your formula)
+        
+        # Calculate matching PV = min(leftPV, rightPV)
+        matched_pv = min(left_pv, right_pv)
+        
+        # Check daily capping
+        today_date = datetime.utcnow().date()
+        last_matching_date = user.get("lastMatchingDate")
+        
+        # Reset daily PV if new day
+        if not last_matching_date or last_matching_date != today_date:
+            daily_pv_used = 0
+        else:
+            daily_pv_used = user.get("dailyPVUsed", 0)
+        
+        # Calculate maximum PV allowed today (based on capping)
+        max_pv_per_day = daily_capping // matching_income_rate  # 500 / 25 = 20 PV max per day
+        remaining_pv_today = max_pv_per_day - daily_pv_used
+        
+        if remaining_pv_today <= 0:
+            return  # Daily limit reached
+        
+        # Today's PV = min(matched_pv, remaining_pv_today)
+        today_pv = min(matched_pv, remaining_pv_today)
+        
+        if today_pv <= 0:
+            return
+        
+        # Calculate income
+        income = today_pv * matching_income_rate
+        
+        # Update user's wallet
+        wallets_collection.update_one(
+            {"userId": user_id},
+            {
+                "$inc": {
+                    "balance": income,
+                    "totalEarnings": income
+                },
+                "$set": {"updatedAt": datetime.utcnow()}
+            }
+        )
+        
+        # Create transaction
+        transactions_collection.insert_one({
+            "userId": user_id,
+            "type": "MATCHING_INCOME",
+            "amount": income,
+            "description": f"Binary matching income - {today_pv} PV @ ₹{matching_income_rate}/PV",
+            "pv": today_pv,
+            "status": "COMPLETED",
+            "createdAt": datetime.utcnow()
+        })
+        
+        # Flush matched PV from both sides
+        users_collection.update_one(
+            {"_id": ObjectId(user_id)},
+            {
+                "$inc": {
+                    "leftPV": -today_pv,
+                    "rightPV": -today_pv,
+                    "totalPV": today_pv  # totalPV = lifetime PV earned
+                },
+                "$set": {
+                    "lastMatchingDate": today_date,
+                    "dailyPVUsed": daily_pv_used + today_pv,
+                    "updatedAt": datetime.utcnow()
+                }
+            }
+        )
+        
+        print(f"Matching income calculated for {user_id}: {income} (PV: {today_pv})")
+        
+    except Exception as e:
+        print(f"Error in matching income calculation: {str(e)}")
+
+
+
 # ==================== WALLET & TRANSACTIONS ====================
 
 @app.get("/api/wallet/balance")
