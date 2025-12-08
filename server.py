@@ -3084,6 +3084,386 @@ async def get_business_report(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+# TEAM/NETWORK REPORTS
+
+@app.get("/api/admin/reports/team/structure")
+async def get_team_structure_report(
+    format: str = "json",
+    current_admin: dict = Depends(get_current_admin)
+):
+    """Get complete team structure report"""
+    try:
+        teams = list(teams_collection.find({}))
+        
+        report_data = []
+        for team in teams:
+            user = users_collection.find_one({"referralId": team.get("userId")})
+            sponsor = users_collection.find_one({"referralId": team.get("sponsorId")})
+            
+            if user:
+                report_data.append({
+                    "User ID": team.get("userId", ""),
+                    "User Name": user.get("name", ""),
+                    "Sponsor ID": team.get("sponsorId", ""),
+                    "Sponsor Name": sponsor.get("name", "") if sponsor else "",
+                    "Placement": team.get("placement", ""),
+                    "Joined Date": user.get("createdAt", datetime.now()).strftime("%d-%m-%Y") if user.get("createdAt") else ""
+                })
+        
+        if format == "excel":
+            headers = ["User ID", "User Name", "Sponsor ID", "Sponsor Name", "Placement", "Joined Date"]
+            output = generate_excel_report(report_data, headers, "Team Structure Report")
+            return StreamingResponse(
+                output,
+                media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                headers={"Content-Disposition": f"attachment; filename=team_structure_{datetime.now(IST).strftime('%Y%m%d_%H%M%S')}.xlsx"}
+            )
+        elif format == "pdf":
+            headers = ["User ID", "User Name", "Sponsor ID", "Sponsor Name", "Placement"]
+            pdf_data = [{k: v for k, v in item.items() if k != "Joined Date"} for item in report_data]
+            output = generate_pdf_report(pdf_data, headers, "Team Structure Report")
+            return StreamingResponse(
+                output,
+                media_type="application/pdf",
+                headers={"Content-Disposition": f"attachment; filename=team_structure_{datetime.now(IST).strftime('%Y%m%d_%H%M%S')}.pdf"}
+            )
+        else:
+            return {"success": True, "data": report_data, "total": len(report_data)}
+    
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/admin/reports/team/downline")
+async def get_downline_report(
+    referral_id: Optional[str] = None,
+    format: str = "json",
+    current_admin: dict = Depends(get_current_admin)
+):
+    """Get downline summary for a specific user or all users"""
+    try:
+        if referral_id:
+            users_to_check = [users_collection.find_one({"referralId": referral_id})]
+        else:
+            users_to_check = list(users_collection.find({"role": "user"}))
+        
+        report_data = []
+        for user in users_to_check:
+            if not user:
+                continue
+                
+            user_id = user.get("referralId", "")
+            
+            # Count direct downline
+            direct_count = teams_collection.count_documents({"sponsorId": user_id})
+            
+            # Get all downline recursively
+            def get_all_downline(sponsor_id, visited=None):
+                if visited is None:
+                    visited = set()
+                if sponsor_id in visited:
+                    return []
+                visited.add(sponsor_id)
+                
+                direct = list(teams_collection.find({"sponsorId": sponsor_id}))
+                all_downline = direct.copy()
+                for member in direct:
+                    all_downline.extend(get_all_downline(member.get("userId"), visited))
+                return all_downline
+            
+            total_downline = len(get_all_downline(user_id))
+            
+            report_data.append({
+                "Referral ID": user_id,
+                "Name": user.get("name", ""),
+                "Direct Downline": direct_count,
+                "Total Downline": total_downline,
+                "Status": "Active" if user.get("isActive", False) else "Inactive"
+            })
+        
+        if format == "excel":
+            headers = ["Referral ID", "Name", "Direct Downline", "Total Downline", "Status"]
+            output = generate_excel_report(report_data, headers, "Downline Summary Report")
+            return StreamingResponse(
+                output,
+                media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                headers={"Content-Disposition": f"attachment; filename=downline_summary_{datetime.now(IST).strftime('%Y%m%d_%H%M%S')}.xlsx"}
+            )
+        elif format == "pdf":
+            headers = ["Referral ID", "Name", "Direct Downline", "Total Downline", "Status"]
+            output = generate_pdf_report(report_data, headers, "Downline Summary Report")
+            return StreamingResponse(
+                output,
+                media_type="application/pdf",
+                headers={"Content-Disposition": f"attachment; filename=downline_summary_{datetime.now(IST).strftime('%Y%m%d_%H%M%S')}.pdf"}
+            )
+        else:
+            return {"success": True, "data": report_data, "total": len(report_data)}
+    
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/admin/reports/team/binary-tree")
+async def get_binary_tree_export(
+    format: str = "json",
+    current_admin: dict = Depends(get_current_admin)
+):
+    """Export binary tree data"""
+    try:
+        teams = list(teams_collection.find({}))
+        
+        report_data = []
+        for team in teams:
+            user = users_collection.find_one({"referralId": team.get("userId")})
+            if user:
+                report_data.append({
+                    "User ID": team.get("userId", ""),
+                    "User Name": user.get("name", ""),
+                    "Sponsor ID": team.get("sponsorId", ""),
+                    "Position": team.get("placement", ""),
+                    "Left Side Count": team.get("leftCount", 0),
+                    "Right Side Count": team.get("rightCount", 0),
+                    "Status": "Active" if user.get("isActive", False) else "Inactive"
+                })
+        
+        if format == "excel":
+            headers = ["User ID", "User Name", "Sponsor ID", "Position", "Left Side Count", "Right Side Count", "Status"]
+            output = generate_excel_report(report_data, headers, "Binary Tree Data Export")
+            return StreamingResponse(
+                output,
+                media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                headers={"Content-Disposition": f"attachment; filename=binary_tree_data_{datetime.now(IST).strftime('%Y%m%d_%H%M%S')}.xlsx"}
+            )
+        elif format == "pdf":
+            headers = ["User ID", "User Name", "Sponsor ID", "Position", "Left Count", "Right Count"]
+            pdf_data = []
+            for item in report_data:
+                pdf_data.append({
+                    "User ID": item["User ID"],
+                    "User Name": item["User Name"],
+                    "Sponsor ID": item["Sponsor ID"],
+                    "Position": item["Position"],
+                    "Left Count": item["Left Side Count"],
+                    "Right Count": item["Right Side Count"]
+                })
+            output = generate_pdf_report(pdf_data, headers, "Binary Tree Data Export")
+            return StreamingResponse(
+                output,
+                media_type="application/pdf",
+                headers={"Content-Disposition": f"attachment; filename=binary_tree_data_{datetime.now(IST).strftime('%Y%m%d_%H%M%S')}.pdf"}
+            )
+        else:
+            return {"success": True, "data": report_data, "total": len(report_data)}
+    
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ANALYTICS REPORTS
+
+@app.get("/api/admin/reports/analytics/registrations")
+async def get_registrations_trend(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    format: str = "json",
+    current_admin: dict = Depends(get_current_admin)
+):
+    """Get daily registrations trend"""
+    try:
+        start, end = parse_date_range(start_date, end_date)
+        
+        if not start:
+            start = datetime.now() - timedelta(days=30)
+        if not end:
+            end = datetime.now()
+        
+        report_data = []
+        current_date = start
+        while current_date <= end:
+            day_end = current_date.replace(hour=23, minute=59, second=59)
+            
+            count = users_collection.count_documents({
+                "role": "user",
+                "createdAt": {"$gte": current_date, "$lte": day_end}
+            })
+            
+            report_data.append({
+                "Date": current_date.strftime("%d-%m-%Y"),
+                "New Registrations": count
+            })
+            
+            current_date += timedelta(days=1)
+        
+        if format == "excel":
+            headers = ["Date", "New Registrations"]
+            output = generate_excel_report(report_data, headers, "Daily Registrations Trend")
+            return StreamingResponse(
+                output,
+                media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                headers={"Content-Disposition": f"attachment; filename=registrations_trend_{datetime.now(IST).strftime('%Y%m%d_%H%M%S')}.xlsx"}
+            )
+        elif format == "pdf":
+            headers = ["Date", "New Registrations"]
+            output = generate_pdf_report(report_data, headers, "Daily Registrations Trend")
+            return StreamingResponse(
+                output,
+                media_type="application/pdf",
+                headers={"Content-Disposition": f"attachment; filename=registrations_trend_{datetime.now(IST).strftime('%Y%m%d_%H%M%S')}.pdf"}
+            )
+        else:
+            total_registrations = sum([r["New Registrations"] for r in report_data])
+            return {
+                "success": True,
+                "data": report_data,
+                "summary": {"total": total_registrations}
+            }
+    
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/admin/reports/analytics/plan-distribution")
+async def get_plan_distribution_report(
+    format: str = "json",
+    current_admin: dict = Depends(get_current_admin)
+):
+    """Get plan distribution analysis"""
+    try:
+        plans = list(plans_collection.find({}))
+        
+        report_data = []
+        total_users_with_plan = 0
+        
+        for plan in plans:
+            plan_id_str = str(plan["_id"])
+            count = users_collection.count_documents({
+                "$or": [
+                    {"currentPlan": plan_id_str},
+                    {"currentPlan": plan["_id"]},
+                    {"currentPlan": plan["name"]}
+                ]
+            })
+            total_users_with_plan += count
+            
+            report_data.append({
+                "Plan Name": plan.get("name", ""),
+                "Price": f"₹{plan.get('price', 0)}",
+                "User Count": count,
+                "Revenue": f"₹{plan.get('price', 0) * count}"
+            })
+        
+        # Add no plan users
+        no_plan_count = users_collection.count_documents({
+            "role": "user",
+            "$or": [
+                {"currentPlan": None},
+                {"currentPlan": ""},
+                {"currentPlan": {"$exists": False}}
+            ]
+        })
+        
+        report_data.append({
+            "Plan Name": "No Plan",
+            "Price": "₹0",
+            "User Count": no_plan_count,
+            "Revenue": "₹0"
+        })
+        
+        if format == "excel":
+            headers = ["Plan Name", "Price", "User Count", "Revenue"]
+            output = generate_excel_report(report_data, headers, "Plan Distribution Analysis")
+            return StreamingResponse(
+                output,
+                media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                headers={"Content-Disposition": f"attachment; filename=plan_distribution_{datetime.now(IST).strftime('%Y%m%d_%H%M%S')}.xlsx"}
+            )
+        elif format == "pdf":
+            headers = ["Plan Name", "Price", "User Count", "Revenue"]
+            output = generate_pdf_report(report_data, headers, "Plan Distribution Analysis")
+            return StreamingResponse(
+                output,
+                media_type="application/pdf",
+                headers={"Content-Disposition": f"attachment; filename=plan_distribution_{datetime.now(IST).strftime('%Y%m%d_%H%M%S')}.pdf"}
+            )
+        else:
+            return {"success": True, "data": report_data, "total": len(report_data)}
+    
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/admin/reports/analytics/growth")
+async def get_growth_statistics(
+    format: str = "json",
+    current_admin: dict = Depends(get_current_admin)
+):
+    """Get growth statistics"""
+    try:
+        # Monthly growth for last 12 months
+        report_data = []
+        
+        for i in range(11, -1, -1):
+            month_start = (datetime.now().replace(day=1) - timedelta(days=i*30)).replace(day=1, hour=0, minute=0, second=0)
+            if i == 0:
+                month_end = datetime.now()
+            else:
+                month_end = (datetime.now().replace(day=1) - timedelta(days=(i-1)*30)).replace(day=1, hour=0, minute=0, second=0)
+            
+            new_users = users_collection.count_documents({
+                "role": "user",
+                "createdAt": {"$gte": month_start, "$lt": month_end}
+            })
+            
+            total_users = users_collection.count_documents({
+                "role": "user",
+                "createdAt": {"$lt": month_end}
+            })
+            
+            # Calculate revenue for the month
+            topups_pipeline = [
+                {"$match": {"status": "APPROVED", "approvedAt": {"$gte": month_start, "$lt": month_end}}},
+                {"$group": {"_id": None, "total": {"$sum": "$amount"}}}
+            ]
+            topups_result = list(topups_collection.aggregate(topups_pipeline))
+            revenue = topups_result[0]["total"] if topups_result else 0
+            
+            report_data.append({
+                "Month": month_start.strftime("%B %Y"),
+                "New Users": new_users,
+                "Total Users": total_users,
+                "Revenue": f"₹{revenue}"
+            })
+        
+        if format == "excel":
+            headers = ["Month", "New Users", "Total Users", "Revenue"]
+            output = generate_excel_report(report_data, headers, "Growth Statistics Report")
+            return StreamingResponse(
+                output,
+                media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                headers={"Content-Disposition": f"attachment; filename=growth_statistics_{datetime.now(IST).strftime('%Y%m%d_%H%M%S')}.xlsx"}
+            )
+        elif format == "pdf":
+            headers = ["Month", "New Users", "Total Users", "Revenue"]
+            output = generate_pdf_report(report_data, headers, "Growth Statistics Report")
+            return StreamingResponse(
+                output,
+                media_type="application/pdf",
+                headers={"Content-Disposition": f"attachment; filename=growth_statistics_{datetime.now(IST).strftime('%Y%m%d_%H%M%S')}.pdf"}
+            )
+        else:
+            return {"success": True, "data": report_data, "total": len(report_data)}
+    
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/api/health")
 async def health_check():
     """Health check endpoint"""
