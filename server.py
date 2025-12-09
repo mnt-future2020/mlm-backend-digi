@@ -538,6 +538,7 @@ async def startup_event():
     
     # Initialize data
     initialize_plans()
+    initialize_ranks()
     initialize_admin()
     
     print("✅ Database initialized successfully")
