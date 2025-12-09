@@ -1652,13 +1652,17 @@ async def get_transactions(
     limit: int = 50,
     skip: int = 0
 ):
-    """Get user transactions"""
+    """Get user transactions (excluding PLAN_ACTIVATION)"""
     try:
-        transactions = list(transactions_collection.find(
-            {"userId": current_user["id"]}
-        ).sort("createdAt", DESCENDING).skip(skip).limit(limit))
+        # Exclude PLAN_ACTIVATION transactions (admin income, not user income)
+        query = {
+            "userId": current_user["id"],
+            "type": {"$ne": "PLAN_ACTIVATION"}
+        }
         
-        total = transactions_collection.count_documents({"userId": current_user["id"]})
+        transactions = list(transactions_collection.find(query).sort("createdAt", DESCENDING).skip(skip).limit(limit))
+        
+        total = transactions_collection.count_documents(query)
         
         return {
             "success": True,
