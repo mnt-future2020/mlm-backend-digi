@@ -3602,9 +3602,8 @@ async def calculate_daily_matching_income(current_admin: dict = Depends(get_curr
     This should be called once per day (manually or via cron job)
     """
     try:
-        # Get all users with active plans
+        # Get all users with active plans (including admin)
         users = list(users_collection.find({
-            "role": "user",
             "isActive": True,
             "currentPlan": {"$ne": None}
         }))
