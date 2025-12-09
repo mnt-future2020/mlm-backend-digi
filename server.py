@@ -1876,9 +1876,22 @@ async def get_all_users(
         plans_map = {str(plan["_id"]): plan for plan in plans_list}
         plans_by_name = {plan["name"]: plan for plan in plans_list}
         
+        # Batch fetch placement information from teams collection
+        user_ids = [str(user["_id"]) for user in users]
+        teams_data = list(teams_collection.find({"userId": {"$in": user_ids}}))
+        teams_map = {team["userId"]: team for team in teams_data}
+        
         # Remove passwords and convert plan IDs to names
         for user in users:
             user.pop("password", None)
+            
+            # Add placement from teams collection
+            user_id = str(user["_id"])
+            team_data = teams_map.get(user_id)
+            if team_data:
+                user["placement"] = team_data.get("placement")
+            else:
+                user["placement"] = None
             
             # Convert currentPlan ObjectId to plan name
             if user.get("currentPlan"):
