@@ -1413,6 +1413,57 @@ async def activate_plan(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/api/topup/request")
+async def create_topup_request(
+    data: dict = Body(...),
+    current_user: dict = Depends(get_current_active_user)
+):
+    """Create a topup/plan upgrade request"""
+    try:
+        plan_id = data.get("planId")
+        payment_method = data.get("paymentMethod", "Bank Transfer")
+        transaction_details = data.get("transactionDetails", "")
+        
+        if not plan_id:
+            raise HTTPException(status_code=400, detail="Plan ID required")
+        
+        if not transaction_details:
+            raise HTTPException(status_code=400, detail="Transaction details required")
+        
+        # Get plan details
+        plan = plans_collection.find_one({"_id": ObjectId(plan_id)})
+        if not plan:
+            raise HTTPException(status_code=404, detail="Plan not found")
+        
+        user_id = current_user["id"]
+        
+        # Create topup request
+        topup_request = {
+            "userId": user_id,
+            "planId": str(plan["_id"]),
+            "amount": plan["amount"],
+            "paymentMethod": payment_method,
+            "transactionDetails": transaction_details,
+            "status": "PENDING",
+            "requestedAt": datetime.now(IST),
+            "createdAt": datetime.now(IST)
+        }
+        
+        result = topups_collection.insert_one(topup_request)
+        
+        return {
+            "success": True,
+            "message": "Topup request submitted successfully. Waiting for admin approval.",
+            "data": {
+                "requestId": str(result.inserted_id),
+                "status": "PENDING"
+            }
+        }
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 # ============ BINARY MLM PV DISTRIBUTION & MATCHING INCOME ============
 
