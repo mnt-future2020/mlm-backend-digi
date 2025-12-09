@@ -1690,6 +1690,13 @@ async def create_withdrawal_request(
         if not amount or amount <= 0:
             raise HTTPException(status_code=400, detail="Invalid amount")
         
+        # Get minimum withdraw limit from settings
+        settings = settings_collection.find_one({})
+        minimum_withdraw_limit = int(settings.get("minimumWithdrawLimit", 1000)) if settings else 1000
+        
+        if amount < minimum_withdraw_limit:
+            raise HTTPException(status_code=400, detail=f"Minimum withdrawal amount is ₹{minimum_withdraw_limit}")
+        
         # Check wallet balance
         wallet = wallets_collection.find_one({"userId": current_user["id"]})
         if not wallet or wallet.get("balance", 0) < amount:
