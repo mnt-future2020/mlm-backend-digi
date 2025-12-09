@@ -1928,6 +1928,60 @@ async def get_admin_dashboard(current_admin: dict = Depends(get_current_admin)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/api/admin/earnings")
+async def get_admin_earnings(current_admin: dict = Depends(get_current_admin)):
+    """Get admin earnings from PLAN_ACTIVATION transactions"""
+    try:
+        admin_id = current_admin["id"]
+        
+        # Get all PLAN_ACTIVATION transactions (admin's income)
+        plan_activations = list(transactions_collection.find({
+            "type": "PLAN_ACTIVATION"
+        }).sort("createdAt", DESCENDING))
+        
+        # Calculate total earnings from plan activations
+        total_earnings = sum(txn.get("amount", 0) for txn in plan_activations)
+        
+        # Get income breakdown by plan type
+        income_by_plan = {}
+        for txn in plan_activations:
+            desc = txn.get("description", "")
+            # Extract plan name from description
+            for plan in ["Basic", "Standard", "Advanced", "Premium"]:
+                if plan in desc:
+                    income_by_plan[plan] = income_by_plan.get(plan, 0) + txn.get("amount", 0)
+                    break
+        
+        # Count of activations
+        total_activations = len(plan_activations)
+        
+        # Recent activations
+        recent_activations = []
+        for txn in plan_activations[:10]:  # Last 10 activations
+            user = users_collection.find_one({"_id": ObjectId(txn["userId"])})
+            if user:
+                recent_activations.append({
+                    "id": str(txn["_id"]),
+                    "userName": user.get("name"),
+                    "userReferralId": user.get("referralId"),
+                    "amount": txn.get("amount"),
+                    "description": txn.get("description"),
+                    "createdAt": txn.get("createdAt")
+                })
+        
+        return {
+            "success": True,
+            "data": {
+                "totalEarnings": total_earnings,
+                "totalActivations": total_activations,
+                "incomeByPlan": income_by_plan,
+                "recentActivations": serialize_doc(recent_activations),
+                "allTransactions": serialize_doc(plan_activations)
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/api/admin/users")
 async def get_all_users(
     current_admin: dict = Depends(get_current_admin),
