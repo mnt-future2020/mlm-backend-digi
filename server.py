@@ -2030,53 +2030,71 @@ async def get_admin_dashboard(current_admin: dict = Depends(get_current_admin)):
 
 @app.get("/api/admin/earnings")
 async def get_admin_earnings(current_admin: dict = Depends(get_current_admin)):
-    """Get admin earnings from PLAN_ACTIVATION transactions"""
+    """Get admin earnings - all income types"""
     try:
         admin_id = current_admin["id"]
         
-        # Get all PLAN_ACTIVATION transactions (admin's income)
-        plan_activations = list(transactions_collection.find({
-            "type": "PLAN_ACTIVATION"
+        # Get admin wallet
+        admin_wallet = wallets_collection.find_one({"userId": admin_id})
+        total_earnings = admin_wallet.get("totalEarnings", 0) if admin_wallet else 0
+        
+        # Get all admin transactions (all income types)
+        all_transactions = list(transactions_collection.find({
+            "userId": admin_id,
+            "amount": {"$gt": 0}  # Only credits
         }).sort("createdAt", DESCENDING))
         
-        # Calculate total earnings from plan activations
-        total_earnings = sum(txn.get("amount", 0) for txn in plan_activations)
+        # Income breakdown by type
+        income_breakdown = {
+            "PLAN_ACTIVATION": 0,
+            "REFERRAL_INCOME": 0,
+            "MATCHING_INCOME": 0,
+            "LEVEL_INCOME": 0
+        }
         
-        # Get income breakdown by plan type
+        for txn in all_transactions:
+            txn_type = txn.get("type")
+            if txn_type in income_breakdown:
+                income_breakdown[txn_type] += txn.get("amount", 0)
+        
+        # Plan activation breakdown
+        plan_activations = [t for t in all_transactions if t.get("type") == "PLAN_ACTIVATION"]
         income_by_plan = {}
         for txn in plan_activations:
             desc = txn.get("description", "")
-            # Extract plan name from description
             for plan in ["Basic", "Standard", "Advanced", "Premium"]:
                 if plan in desc:
                     income_by_plan[plan] = income_by_plan.get(plan, 0) + txn.get("amount", 0)
                     break
         
-        # Count of activations
-        total_activations = len(plan_activations)
-        
-        # Recent activations
-        recent_activations = []
-        for txn in plan_activations[:10]:  # Last 10 activations
-            user = users_collection.find_one({"_id": ObjectId(txn["userId"])})
-            if user:
-                recent_activations.append({
-                    "id": str(txn["_id"]),
-                    "userName": user.get("name"),
-                    "userReferralId": user.get("referralId"),
-                    "amount": txn.get("amount"),
-                    "description": txn.get("description"),
-                    "createdAt": txn.get("createdAt")
-                })
+        # Recent transactions (last 20)
+        recent_transactions = []
+        for txn in all_transactions[:20]:
+            user = None
+            if txn.get("userId") != admin_id and txn.get("fromUser"):
+                user = users_collection.find_one({"_id": ObjectId(txn["fromUser"])})
+            elif txn.get("userId") != admin_id:
+                user = users_collection.find_one({"_id": ObjectId(txn["userId"])})
+            
+            recent_transactions.append({
+                "id": str(txn["_id"]),
+                "type": txn.get("type"),
+                "userName": user.get("name") if user else "System",
+                "userReferralId": user.get("referralId") if user else "-",
+                "amount": txn.get("amount"),
+                "description": txn.get("description"),
+                "createdAt": txn.get("createdAt")
+            })
         
         return {
             "success": True,
             "data": {
                 "totalEarnings": total_earnings,
-                "totalActivations": total_activations,
+                "incomeBreakdown": income_breakdown,
+                "totalActivations": len(plan_activations),
                 "incomeByPlan": income_by_plan,
-                "recentActivations": serialize_doc(recent_activations),
-                "allTransactions": serialize_doc(plan_activations)
+                "recentTransactions": serialize_doc(recent_transactions),
+                "allTransactions": serialize_doc(all_transactions)
             }
         }
     except Exception as e:
