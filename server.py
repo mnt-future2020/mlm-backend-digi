@@ -1027,6 +1027,10 @@ async def get_user_details(user_id: str, current_user: dict = Depends(get_curren
         left_count = teams_collection.count_documents({"sponsorId": str(user["_id"]), "placement": "LEFT"})
         right_count = teams_collection.count_documents({"sponsorId": str(user["_id"]), "placement": "RIGHT"})
         
+        # Get user's own placement from teams collection
+        user_team_record = teams_collection.find_one({"userId": str(user["_id"])})
+        user_placement = user_team_record.get("placement") if user_team_record else None
+        
         # Build response
         user_details = {
             "id": str(user["_id"]),
@@ -1036,6 +1040,7 @@ async def get_user_details(user_id: str, current_user: dict = Depends(get_curren
             "mobile": user.get("mobile"),
             "referralId": user.get("referralId"),
             "sponsorId": user.get("sponsorId"),
+            "placement": user_placement,
             "sponsor": sponsor_info,
             "isActive": user.get("isActive", False),
             "currentPlan": plan_details,
