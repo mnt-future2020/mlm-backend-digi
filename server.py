@@ -1868,6 +1868,47 @@ async def update_email_config(data: dict = Body(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+# Ranks Management
+@app.get("/api/settings/ranks")
+async def get_ranks():
+    """Get all ranks"""
+    try:
+        ranks = list(ranks_collection.find({}).sort("order", ASCENDING))
+        return {"success": True, "data": serialize_doc(ranks)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/settings/ranks")
+async def save_ranks(data: dict = Body(...)):
+    """Save/update ranks"""
+    try:
+        ranks_data = data.get("ranks", [])
+        
+        # Clear existing ranks
+        ranks_collection.delete_many({})
+        
+        # Insert new ranks
+        if ranks_data:
+            # Remove _id from new ranks if present
+            for rank in ranks_data:
+                rank.pop("_id", None)
+            ranks_collection.insert_many(ranks_data)
+        
+        return {"success": True, "message": "Ranks updated successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/settings/ranks/{rank_id}")
+async def delete_rank(rank_id: str):
+    """Delete a rank"""
+    try:
+        result = ranks_collection.delete_one({"_id": ObjectId(rank_id)})
+        if result.deleted_count == 0:
+            raise HTTPException(status_code=404, detail="Rank not found")
+        return {"success": True, "message": "Rank deleted successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 # ==================== ADMIN ROUTES ====================
 
 @app.get("/api/admin/dashboard")
