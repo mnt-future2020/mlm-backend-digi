@@ -102,6 +102,39 @@ def generate_referral_id(prefix="VSV"):
         if not users_collection.find_one({"referralId": referral_id}):
             return referral_id
 
+def get_user_rank(total_pv: int):
+    """Get user rank based on total PV"""
+    # Get all ranks sorted by minPV descending
+    ranks = list(ranks_collection.find({}).sort("minPV", DESCENDING))
+    
+    # Find the highest rank user qualifies for
+    for rank in ranks:
+        if total_pv >= rank.get("minPV", 0):
+            return {
+                "name": rank.get("name"),
+                "icon": rank.get("icon"),
+                "color": rank.get("color"),
+                "minPV": rank.get("minPV")
+            }
+    
+    # If no rank found, return lowest rank
+    lowest_rank = ranks_collection.find_one({}, sort=[("minPV", ASCENDING)])
+    if lowest_rank:
+        return {
+            "name": lowest_rank.get("name"),
+            "icon": lowest_rank.get("icon"),
+            "color": lowest_rank.get("color"),
+            "minPV": lowest_rank.get("minPV")
+        }
+    
+    # Default rank if no ranks defined
+    return {
+        "name": "Member",
+        "icon": "👤",
+        "color": "#6B7280",
+        "minPV": 0
+    }
+
 def serialize_doc(doc):
     """Convert MongoDB document to JSON serializable format"""
     if doc is None:
