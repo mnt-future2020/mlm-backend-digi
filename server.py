@@ -1031,6 +1031,23 @@ async def get_user_details(user_id: str, current_user: dict = Depends(get_curren
         user_team_record = teams_collection.find_one({"userId": str(user["_id"])})
         user_placement = user_team_record.get("placement") if user_team_record else None
         
+        # Get income breakdown from transactions
+        income_breakdown = {
+            "REFERRAL_INCOME": 0,
+            "MATCHING_INCOME": 0,
+            "LEVEL_INCOME": 0
+        }
+        
+        income_types = ["REFERRAL_INCOME", "MATCHING_INCOME", "LEVEL_INCOME"]
+        for income_type in income_types:
+            result = transactions_collection.aggregate([
+                {"$match": {"userId": str(user["_id"]), "type": income_type, "status": "COMPLETED"}},
+                {"$group": {"_id": None, "total": {"$sum": "$amount"}}}
+            ])
+            total = list(result)
+            if total:
+                income_breakdown[income_type] = total[0].get("total", 0)
+        
         # Build response
         user_details = {
             "id": str(user["_id"]),
@@ -1045,6 +1062,7 @@ async def get_user_details(user_id: str, current_user: dict = Depends(get_curren
             "isActive": user.get("isActive", False),
             "currentPlan": plan_details,
             "wallet": wallet_data,
+            "incomeBreakdown": income_breakdown,
             "pv": {
                 "leftPV": user.get("leftPV", 0),
                 "rightPV": user.get("rightPV", 0),
