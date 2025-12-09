@@ -980,6 +980,10 @@ async def get_user_dashboard(current_user: dict = Depends(get_current_active_use
             "type": {"$ne": "PLAN_ACTIVATION"}
         }).sort("createdAt", DESCENDING).limit(5))
         
+        # Get user rank based on total PV
+        total_pv = fresh_user.get("totalPV", 0) if fresh_user else 0
+        user_rank = get_user_rank(total_pv)
+        
         return {
             "success": True,
             "data": {
@@ -990,6 +994,7 @@ async def get_user_dashboard(current_user: dict = Depends(get_current_active_use
                     "right": right_team
                 },
                 "currentPlan": current_plan,
+                "rank": user_rank,
                 "recentTransactions": serialize_doc(transactions)
             }
         }
