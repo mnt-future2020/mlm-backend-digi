@@ -872,21 +872,22 @@ async def get_user_dashboard(current_user: dict = Depends(get_current_active_use
             "placement": "RIGHT"
         })
         
-        # Get current plan
+        # Get current plan (fetch fresh from database, not from JWT token)
+        fresh_user = users_collection.find_one({"_id": ObjectId(user_id)})
         current_plan = None
-        plan_id = current_user.get("currentPlanId")
-        if plan_id:
+        
+        if fresh_user and fresh_user.get("currentPlan"):
+            plan_value = fresh_user.get("currentPlan")
             try:
-                plan = plans_collection.find_one({"_id": ObjectId(plan_id)})
+                # Try as ObjectId first
+                plan = plans_collection.find_one({"_id": ObjectId(plan_value)})
                 if plan:
                     current_plan = serialize_doc(plan)
             except:
-                # If currentPlanId is invalid, try with currentPlan name
-                plan_name = current_user.get("currentPlan")
-                if plan_name:
-                    plan = plans_collection.find_one({"name": plan_name})
-                    if plan:
-                        current_plan = serialize_doc(plan)
+                # Try as plan name
+                plan = plans_collection.find_one({"name": plan_value})
+                if plan:
+                    current_plan = serialize_doc(plan)
         
         # Get recent transactions
         transactions = list(transactions_collection.find(
