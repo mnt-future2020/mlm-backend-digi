@@ -3624,13 +3624,22 @@ async def calculate_daily_matching_income(current_admin: dict = Depends(get_curr
             # Calculate matching income
             try:
                 # Get plan details
+                plan = None
                 plan_id = user.get("currentPlanId")
-                if not plan_id:
-                    # Try to get by name
-                    plan_name = user.get("currentPlan")
-                    plan = plans_collection.find_one({"name": plan_name})
-                else:
+                plan_value = user.get("currentPlan")
+                
+                if plan_id:
+                    # Try by currentPlanId
                     plan = plans_collection.find_one({"_id": ObjectId(plan_id)})
+                elif plan_value:
+                    # Try by name first
+                    plan = plans_collection.find_one({"name": plan_value})
+                    if not plan:
+                        # Try as ObjectId string
+                        try:
+                            plan = plans_collection.find_one({"_id": ObjectId(plan_value)})
+                        except:
+                            pass
                 
                 if not plan:
                     continue
