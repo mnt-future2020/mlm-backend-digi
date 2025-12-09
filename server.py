@@ -889,10 +889,11 @@ async def get_user_dashboard(current_user: dict = Depends(get_current_active_use
                 if plan:
                     current_plan = serialize_doc(plan)
         
-        # Get recent transactions
-        transactions = list(transactions_collection.find(
-            {"userId": user_id}
-        ).sort("createdAt", DESCENDING).limit(5))
+        # Get recent transactions (exclude PLAN_ACTIVATION)
+        transactions = list(transactions_collection.find({
+            "userId": user_id,
+            "type": {"$ne": "PLAN_ACTIVATION"}
+        }).sort("createdAt", DESCENDING).limit(5))
         
         return {
             "success": True,
