@@ -2460,12 +2460,28 @@ async def approve_topup(
             {"_id": ObjectId(user_id)},
             {
                 "$set": {
-                    "currentPlanId": plan_id,
-                    "currentPlan": plan["name"],
-                    "activatedAt": datetime.utcnow()
+                    "currentPlan": str(plan["_id"]),
+                    "currentPlanName": plan["name"],
+                    "dailyPVLimit": plan.get("dailyCapping", 500) // 25,
+                    "updatedAt": datetime.utcnow()
                 }
             }
         )
+        
+        # Create transaction for user
+        transactions_collection.insert_one({
+            "userId": user_id,
+            "type": "PLAN_ACTIVATION",
+            "amount": plan["amount"],
+            "description": f"Activated {plan['name']} plan",
+            "status": "COMPLETED",
+            "createdAt": datetime.utcnow()
+        })
+        
+        # Distribute PV upward in the binary tree
+        pv_amount = plan.get("pv", 0)
+        if pv_amount > 0:
+            distribute_pv_upward(user_id, pv_amount)
         
         # Update topup status
         topups_collection.update_one(
@@ -2473,7 +2489,7 @@ async def approve_topup(
             {
                 "$set": {
                     "status": "APPROVED",
-                    "approvedAt": datetime.utcnow(),
+                    "approvedAt": datetime.now(IST),
                     "approvedBy": current_admin["id"]
                 }
             }
@@ -2482,24 +2498,32 @@ async def approve_topup(
         # Give referral income to sponsor
         user = users_collection.find_one({"_id": ObjectId(user_id)})
         if user and user.get("sponsorId"):
-            sponsor = users_collection.find_one({"_id": ObjectId(user["sponsorId"])})
+            sponsor = users_collection.find_one({"referralId": user["sponsorId"]})
             if sponsor:
+                sponsor_id = str(sponsor["_id"])
                 referral_income = plan.get("referralIncome", 0)
                 
                 # Update sponsor wallet
                 wallets_collection.update_one(
-                    {"userId": user["sponsorId"]},
-                    {"$inc": {"balance": referral_income}}
+                    {"userId": sponsor_id},
+                    {
+                        "$inc": {
+                            "balance": referral_income,
+                            "totalEarnings": referral_income
+                        },
+                        "$set": {"updatedAt": datetime.now(IST)}
+                    }
                 )
                 
                 # Create transaction for sponsor
                 transactions_collection.insert_one({
-                    "userId": user["sponsorId"],
+                    "userId": sponsor_id,
                     "type": "REFERRAL_INCOME",
                     "amount": referral_income,
                     "description": f"Referral income from {user['name']} plan activation",
                     "status": "COMPLETED",
-                    "createdAt": datetime.utcnow()
+                    "fromUser": user_id,
+                    "createdAt": datetime.now(IST)
                 })
         
         return {
