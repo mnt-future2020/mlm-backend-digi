@@ -427,6 +427,56 @@ def initialize_plans():
         plans_collection.insert_many(plans)
         print("✅ Default plans initialized")
 
+# Initialize default ranks
+def initialize_ranks():
+    """Initialize default ranks if they don't exist"""
+    existing_ranks = ranks_collection.count_documents({})
+    if existing_ranks == 0:
+        default_ranks = [
+            {
+                "name": "Bronze",
+                "minPV": 0,
+                "color": "#CD7F32",
+                "icon": "🥉",
+                "benefits": ["Access to basic features", "Basic support"],
+                "order": 1
+            },
+            {
+                "name": "Silver",
+                "minPV": 100,
+                "color": "#C0C0C0",
+                "icon": "🥈",
+                "benefits": ["Priority support", "Monthly bonus", "Team building tools"],
+                "order": 2
+            },
+            {
+                "name": "Gold",
+                "minPV": 500,
+                "color": "#FFD700",
+                "icon": "🥇",
+                "benefits": ["Premium support", "Leadership bonus", "Advanced training"],
+                "order": 3
+            },
+            {
+                "name": "Platinum",
+                "minPV": 1000,
+                "color": "#E5E4E2",
+                "icon": "💎",
+                "benefits": ["VIP support", "Car fund", "International trips", "Recognition awards"],
+                "order": 4
+            },
+            {
+                "name": "Diamond",
+                "minPV": 5000,
+                "color": "#B9F2FF",
+                "icon": "💍",
+                "benefits": ["Elite support", "House fund", "Luxury trips", "Leadership summit"],
+                "order": 5
+            }
+        ]
+        ranks_collection.insert_many(default_ranks)
+        print("✅ Default ranks initialized")
+
 # Initialize admin user
 def initialize_admin():
     """Create admin user if not exists"""
