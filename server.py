@@ -63,6 +63,7 @@ withdrawals_collection = db["withdrawals"]
 settings_collection = db["settings"]
 email_configs_collection = db["email_configs"]
 topups_collection = db["topups"]
+ranks_collection = db["ranks"]
 
 # JWT Configuration
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
