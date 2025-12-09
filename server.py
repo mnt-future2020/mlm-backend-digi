@@ -1302,6 +1302,10 @@ async def get_all_teams(
                         elif isinstance(user.get("currentPlan"), str) and len(user.get("currentPlan")) < 50:
                             plan_name = user.get("currentPlan")
                 
+                # Get user rank
+                total_pv = user.get("totalPV", 0)
+                user_rank = get_user_rank(total_pv)
+                
                 member_data = {
                     "id": str(user["_id"]),
                     "name": user["name"],
@@ -1311,6 +1315,7 @@ async def get_all_teams(
                     "placement": team.get("placement"),
                     "currentPlan": plan_name,
                     "isActive": user.get("isActive", False),
+                    "rank": user_rank,
                     "joinedAt": user.get("createdAt", datetime.utcnow()).isoformat(),
                     "sponsorName": sponsor["name"] if sponsor else "N/A",
                     "sponsorId": sponsor["referralId"] if sponsor else "N/A"
