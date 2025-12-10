@@ -660,10 +660,11 @@ async def register(user: UserRegister):
         
         # Add to team structure if has sponsor
         if sponsor:
+            # Use auto-placement: actual_sponsor_id and actual_placement
             teams_collection.insert_one({
                 "userId": user_id,
-                "sponsorId": str(sponsor["_id"]),
-                "placement": user.placement,
+                "sponsorId": actual_sponsor_id,  # This is the actual sponsor after auto-placement
+                "placement": actual_placement,    # This is the actual placement side
                 "level": 1,
                 "createdAt": datetime.utcnow()
             })
