@@ -2721,36 +2721,36 @@ async def approve_topup(
             }
         )
         
-        # Give referral income to sponsor
-        user = users_collection.find_one({"_id": ObjectId(user_id)})
-        if user and user.get("sponsorId"):
-            sponsor = users_collection.find_one({"referralId": user["sponsorId"]})
-            if sponsor:
-                sponsor_id = str(sponsor["_id"])
-                referral_income = plan.get("referralIncome", 0)
-                
-                # Update sponsor wallet
-                wallets_collection.update_one(
-                    {"userId": sponsor_id},
-                    {
-                        "$inc": {
-                            "balance": referral_income,
-                            "totalEarnings": referral_income
-                        },
-                        "$set": {"updatedAt": datetime.now(IST)}
-                    }
-                )
-                
-                # Create transaction for sponsor
-                transactions_collection.insert_one({
-                    "userId": sponsor_id,
-                    "type": "REFERRAL_INCOME",
-                    "amount": referral_income,
-                    "description": f"Referral income from {user['name']} plan activation",
-                    "status": "COMPLETED",
-                    "fromUser": user_id,
-                    "createdAt": datetime.now(IST)
-                })
+        # REFERRAL INCOME REMOVED - No longer giving referral income to sponsor
+        # user = users_collection.find_one({"_id": ObjectId(user_id)})
+        # if user and user.get("sponsorId"):
+        #     sponsor = users_collection.find_one({"referralId": user["sponsorId"]})
+        #     if sponsor:
+        #         sponsor_id = str(sponsor["_id"])
+        #         referral_income = plan.get("referralIncome", 0)
+        #         
+        #         # Update sponsor wallet
+        #         wallets_collection.update_one(
+        #             {"userId": sponsor_id},
+        #             {
+        #                 "$inc": {
+        #                     "balance": referral_income,
+        #                     "totalEarnings": referral_income
+        #                 },
+        #                 "$set": {"updatedAt": datetime.now(IST)}
+        #             }
+        #         )
+        #         
+        #         # Create transaction for sponsor
+        #         transactions_collection.insert_one({
+        #             "userId": sponsor_id,
+        #             "type": "REFERRAL_INCOME",
+        #             "amount": referral_income,
+        #             "description": f"Referral income from {user['name']} plan activation",
+        #             "status": "COMPLETED",
+        #             "fromUser": user_id,
+        #             "createdAt": datetime.now(IST)
+        #         })
         
         return {
             "success": True,
