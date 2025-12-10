@@ -23,6 +23,9 @@ from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, 
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
 
+# Import auto-placement service
+from app.services.placement_service import get_auto_placement_position, get_placement_info_for_display
+
 # Indian Standard Time timezone
 IST = pytz.timezone('Asia/Kolkata')
 
