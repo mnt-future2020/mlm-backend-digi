@@ -656,31 +656,31 @@ async def register(user: UserRegister):
                 "createdAt": datetime.utcnow()
             })
             
-            # Give referral income and distribute PV if plan is assigned
+            # Distribute PV if plan is assigned (referral income system removed)
             if plan:
                 # Distribute PV upward in binary tree
                 pv_amount = plan.get("pv", 0)
                 if pv_amount > 0:
                     distribute_pv_upward(user_id, pv_amount)
                 
-                # Give referral income
-                referral_income = plan.get("referralIncome", 0)
-                if referral_income > 0:
-                    # Update sponsor wallet
-                    wallets_collection.update_one(
-                        {"userId": str(sponsor["_id"])},
-                        {"$inc": {"balance": referral_income, "totalEarnings": referral_income}}
-                    )
-                    
-                    # Create transaction for sponsor
-                    transactions_collection.insert_one({
-                        "userId": str(sponsor["_id"]),
-                        "type": "REFERRAL_INCOME",
-                        "amount": referral_income,
-                        "description": f"Referral income from {user.name} plan activation",
-                        "status": "COMPLETED",
-                        "createdAt": datetime.utcnow()
-                    })
+                # REFERRAL INCOME REMOVED - No longer giving referral income to sponsor
+                # referral_income = plan.get("referralIncome", 0)
+                # if referral_income > 0:
+                #     # Update sponsor wallet
+                #     wallets_collection.update_one(
+                #         {"userId": str(sponsor["_id"])},
+                #         {"$inc": {"balance": referral_income, "totalEarnings": referral_income}}
+                #     )
+                #     
+                #     # Create transaction for sponsor
+                #     transactions_collection.insert_one({
+                #         "userId": str(sponsor["_id"]),
+                #         "type": "REFERRAL_INCOME",
+                #         "amount": referral_income,
+                #         "description": f"Referral income from {user.name} plan activation",
+                #         "status": "COMPLETED",
+                #         "createdAt": datetime.utcnow()
+                #     })
         
         # Create access token
         access_token = create_access_token(data={"sub": user.username, "userId": user_id})
