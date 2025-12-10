@@ -595,6 +595,9 @@ async def register(user: UserRegister):
         
         # Validate referral ID if provided
         sponsor = None
+        actual_sponsor_id = None
+        actual_placement = None
+        
         if user.referralId:
             sponsor = users_collection.find_one({"referralId": user.referralId})
             if not sponsor:
@@ -602,6 +605,12 @@ async def register(user: UserRegister):
             
             if not user.placement:
                 raise HTTPException(status_code=400, detail="Placement is required when using referral ID")
+            
+            # Get auto-placement position (deepest left-most or right-most)
+            actual_sponsor_id, actual_placement = get_auto_placement_position(
+                str(sponsor["_id"]), 
+                user.placement
+            )
         
         # Generate unique referral ID
         referral_id = generate_referral_id()
