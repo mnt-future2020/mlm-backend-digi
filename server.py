@@ -821,6 +821,39 @@ async def lookup_referral(data: ReferralLookup):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/api/auth/preview-placement")
+async def preview_placement(data: dict = Body(...)):
+    """
+    Preview where a new user will be placed in the binary tree
+    Used to show auto-placement position before registration
+    """
+    try:
+        referral_id = data.get("referralId")
+        placement = data.get("placement")  # "LEFT" or "RIGHT"
+        
+        if not referral_id or not placement:
+            raise HTTPException(status_code=400, detail="referralId and placement are required")
+        
+        # Find sponsor
+        sponsor = users_collection.find_one({"referralId": referral_id})
+        if not sponsor:
+            raise HTTPException(status_code=404, detail="Invalid referral ID")
+        
+        # Get placement info
+        placement_info = get_placement_info_for_display(str(sponsor["_id"]), placement)
+        
+        if not placement_info:
+            raise HTTPException(status_code=500, detail="Could not determine placement")
+        
+        return {
+            "success": True,
+            "data": placement_info
+        }
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/api/auth/get-session")
 async def get_session():
     """Get current session - placeholder"""
