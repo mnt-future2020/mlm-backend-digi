@@ -2272,12 +2272,20 @@ async def get_admin_dashboard(current_admin: dict = Depends(get_current_admin)):
 async def get_admin_earnings(current_admin: dict = Depends(get_current_admin)):
     """Get admin earnings - platform revenue from plan activations"""
     try:
+        admin_id = current_admin["id"]
+        
+        # Get admin user data for PV info
+        admin_user = users_collection.find_one({"_id": ObjectId(admin_id)})
+        admin_left_pv = admin_user.get("leftPV", 0) if admin_user else 0
+        admin_right_pv = admin_user.get("rightPV", 0) if admin_user else 0
+        admin_total_pv = admin_user.get("totalPV", 0) if admin_user else 0
+        
         # Get all plan activation transactions (platform revenue)
         all_activations = list(transactions_collection.find({
             "type": "PLAN_ACTIVATION"
         }).sort("createdAt", DESCENDING))
         
-        # Calculate total revenue
+        # Calculate total revenue from plan activations
         total_revenue = sum(txn.get("amount", 0) for txn in all_activations)
         
         # Get all matching income paid to users (payouts)
@@ -2287,10 +2295,14 @@ async def get_admin_earnings(current_admin: dict = Depends(get_current_admin)):
         
         total_matching_paid = sum(txn.get("amount", 0) for txn in all_matching)
         
-        # Income breakdown (only PLAN_ACTIVATION and MATCHING_INCOME)
+        # Net Profit = Total Revenue - Matching Income Paid
+        net_profit = total_revenue - total_matching_paid
+        
+        # Income breakdown
         income_breakdown = {
             "PLAN_ACTIVATION": total_revenue,
-            "MATCHING_INCOME": total_matching_paid
+            "MATCHING_INCOME": total_matching_paid,
+            "NET_PROFIT": net_profit
         }
         
         # Plan activation breakdown by plan name
@@ -2301,6 +2313,19 @@ async def get_admin_earnings(current_admin: dict = Depends(get_current_admin)):
                 if plan in desc:
                     income_by_plan[plan] = income_by_plan.get(plan, 0) + txn.get("amount", 0)
                     break
+        
+        # Today's calculations
+        today_start = get_ist_now().replace(hour=0, minute=0, second=0, microsecond=0)
+        today_activations = [t for t in all_activations if t.get("createdAt") and t.get("createdAt") >= today_start]
+        today_revenue = sum(txn.get("amount", 0) for txn in today_activations)
+        
+        today_matching = [t for t in all_matching if t.get("createdAt") and t.get("createdAt") >= today_start]
+        today_matching_paid = sum(txn.get("amount", 0) for txn in today_matching)
+        
+        # This month calculations
+        month_start = get_ist_now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        month_activations = [t for t in all_activations if t.get("createdAt") and t.get("createdAt") >= month_start]
+        month_revenue = sum(txn.get("amount", 0) for txn in month_activations)
         
         # Recent transactions (plan activations + matching income paid)
         recent_transactions = []
@@ -2331,7 +2356,19 @@ async def get_admin_earnings(current_admin: dict = Depends(get_current_admin)):
         return {
             "success": True,
             "data": {
+                "totalRevenue": total_revenue,
                 "totalEarnings": total_revenue,
+                "netProfit": net_profit,
+                "totalMatchingPaid": total_matching_paid,
+                "todayRevenue": today_revenue,
+                "todayMatchingPaid": today_matching_paid,
+                "monthRevenue": month_revenue,
+                "adminPV": {
+                    "leftPV": admin_left_pv,
+                    "rightPV": admin_right_pv,
+                    "totalPV": admin_total_pv,
+                    "matchablePV": min(admin_left_pv, admin_right_pv)
+                },
                 "incomeBreakdown": income_breakdown,
                 "totalActivations": len(all_activations),
                 "incomeByPlan": income_by_plan,
