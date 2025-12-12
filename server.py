@@ -475,9 +475,6 @@ class UserRegister(BaseModel):
         if v is None or v == '' or (isinstance(v, str) and v.strip() == ''):
             return None
         return v
-        if '@' not in v:
-            raise ValueError('Invalid email format')
-        return v
 
 class UserLogin(BaseModel):
     email: Optional[str] = None
