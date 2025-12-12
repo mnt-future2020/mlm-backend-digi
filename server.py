@@ -430,7 +430,7 @@ async def get_current_admin(authorization: Optional[str] = Header(None)):
 class UserRegister(BaseModel):
     name: str
     username: str
-    email: Optional[EmailStr] = None
+    email: Optional[str] = None  # Changed from EmailStr to str to allow empty
     password: str
     mobile: str
     referralId: Optional[str] = None
@@ -441,6 +441,16 @@ class UserRegister(BaseModel):
     def validate_placement(cls, v):
         if v and v not in ['LEFT', 'RIGHT']:
             raise ValueError('Placement must be LEFT or RIGHT')
+        return v
+    
+    @field_validator('email')
+    def validate_email(cls, v):
+        # Allow empty string or None
+        if v is None or v == '' or v.strip() == '':
+            return None
+        # Basic email validation if provided
+        if '@' not in v:
+            raise ValueError('Invalid email format')
         return v
 
 class UserLogin(BaseModel):
