@@ -1892,6 +1892,110 @@ def calculate_matching_income(user_id: str):
         print(f"Error in matching income calculation: {str(e)}")
 
 
+def process_eod_matching_for_all_users():
+    """
+    Process EOD matching calculation for all active users
+    This runs the matching calculation and carry forward logic
+    """
+    try:
+        # Get all active users with a plan
+        active_users = list(users_collection.find({
+            "isActive": True,
+            "currentPlan": {"$ne": None}
+        }))
+        
+        processed_count = 0
+        total_income = 0
+        
+        for user in active_users:
+            try:
+                user_id = str(user["_id"])
+                left_pv = user.get("leftPV", 0)
+                right_pv = user.get("rightPV", 0)
+                
+                # Only process if both sides have PV
+                if left_pv > 0 and right_pv > 0:
+                    # Get pre-calculation balance
+                    wallet = wallets_collection.find_one({"userId": user_id})
+                    pre_balance = wallet.get("balance", 0) if wallet else 0
+                    
+                    # Calculate matching income
+                    calculate_matching_income(user_id)
+                    
+                    # Get post-calculation balance
+                    wallet = wallets_collection.find_one({"userId": user_id})
+                    post_balance = wallet.get("balance", 0) if wallet else 0
+                    
+                    income_earned = post_balance - pre_balance
+                    if income_earned > 0:
+                        total_income += income_earned
+                        processed_count += 1
+                        
+            except Exception as user_error:
+                print(f"Error processing user {user.get('referralId')}: {str(user_error)}")
+                continue
+        
+        return {
+            "processedUsers": processed_count,
+            "totalIncomeDistributed": total_income,
+            "timestamp": get_ist_now().isoformat()
+        }
+        
+    except Exception as e:
+        print(f"Error in EOD matching process: {str(e)}")
+        return {"error": str(e)}
+
+
+def process_carry_forward():
+    """
+    Process carry forward of unmatched PV to next day
+    In binary MLM, unmatched PV (the difference) carries forward
+    """
+    try:
+        # Get all active users
+        active_users = list(users_collection.find({
+            "isActive": True,
+            "currentPlan": {"$ne": None}
+        }))
+        
+        carried_forward_count = 0
+        
+        for user in active_users:
+            try:
+                user_id = str(user["_id"])
+                left_pv = user.get("leftPV", 0)
+                right_pv = user.get("rightPV", 0)
+                
+                # Calculate carry forward (weaker leg's remaining PV after matching)
+                matched_pv = min(left_pv, right_pv)
+                
+                # After matching, subtract matched PV from both sides
+                # Stronger leg retains the difference (carry forward)
+                # This is already handled in calculate_matching_income
+                
+                # Reset daily PV used at EOD
+                users_collection.update_one(
+                    {"_id": user["_id"]},
+                    {
+                        "$set": {
+                            "dailyPVUsed": 0,
+                            "lastEODProcessed": get_ist_now(),
+                            "updatedAt": get_ist_now()
+                        }
+                    }
+                )
+                carried_forward_count += 1
+                
+            except Exception as user_error:
+                print(f"Error in carry forward for user {user.get('referralId')}: {str(user_error)}")
+                continue
+        
+        return {"usersProcessed": carried_forward_count}
+        
+    except Exception as e:
+        print(f"Error in carry forward process: {str(e)}")
+        return {"error": str(e)}
+
 
 # ==================== WALLET & TRANSACTIONS ====================
 
