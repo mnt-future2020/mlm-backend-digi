@@ -171,9 +171,33 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 def hash_password(password: str) -> str:
     return pwd_context.hash(password)
 
+def get_system_time_offset():
+    """Get system time offset from settings (in minutes)"""
+    try:
+        settings = settings_collection.find_one({})
+        if settings and settings.get("systemTimeOffset"):
+            return int(settings.get("systemTimeOffset", 0))
+    except:
+        pass
+    return 0
+
 def get_ist_now():
-    """Get current time in IST"""
-    return datetime.now(IST)
+    """Get current time in IST with optional offset from settings"""
+    base_time = datetime.now(IST)
+    offset_minutes = get_system_time_offset()
+    if offset_minutes != 0:
+        return base_time + timedelta(minutes=offset_minutes)
+    return base_time
+
+def get_eod_time():
+    """Get End of Day time from settings (default 23:59)"""
+    try:
+        settings = settings_collection.find_one({})
+        if settings and settings.get("eodTime"):
+            return settings.get("eodTime", "23:59")
+    except:
+        pass
+    return "23:59"
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     return pwd_context.verify(plain_password, hashed_password)
