@@ -1337,6 +1337,7 @@ async def get_user_details(user_id: str, current_user: dict = Depends(get_curren
                 "leftPV": user.get("leftPV", 0),
                 "rightPV": user.get("rightPV", 0),
                 "totalPV": user.get("totalPV", 0),
+                "planPV": plan_details.get("pv", 0) if plan_details else 0,  # PV from user's plan
                 "dailyPVUsed": user.get("dailyPVUsed", 0)
             },
             "team": {
