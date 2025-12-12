@@ -2478,18 +2478,47 @@ async def get_admin_earnings(current_admin: dict = Depends(get_current_admin)):
                     income_by_plan[plan] = income_by_plan.get(plan, 0) + txn.get("amount", 0)
                     break
         
-        # Today's calculations
-        today_start = get_ist_now().replace(hour=0, minute=0, second=0, microsecond=0)
-        today_activations = [t for t in all_activations if t.get("createdAt") and t.get("createdAt") >= today_start]
-        today_revenue = sum(txn.get("amount", 0) for txn in today_activations)
+        # Today's calculations - handle timezone-naive dates safely
+        now = get_ist_now()
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         
-        today_matching = [t for t in all_matching_paid if t.get("createdAt") and t.get("createdAt") >= today_start]
-        today_matching_paid = sum(txn.get("amount", 0) for txn in today_matching)
+        today_revenue = 0
+        today_matching_paid_amount = 0
+        month_revenue = 0
         
-        # This month calculations
-        month_start = get_ist_now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        month_activations = [t for t in all_activations if t.get("createdAt") and t.get("createdAt") >= month_start]
-        month_revenue = sum(txn.get("amount", 0) for txn in month_activations)
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        
+        for txn in all_activations:
+            created_at = txn.get("createdAt")
+            if created_at:
+                try:
+                    # Make timezone-naive for comparison if needed
+                    if hasattr(created_at, 'tzinfo') and created_at.tzinfo is not None:
+                        txn_date = created_at
+                    else:
+                        txn_date = IST.localize(created_at) if created_at else None
+                    
+                    if txn_date:
+                        if txn_date >= today_start:
+                            today_revenue += txn.get("amount", 0)
+                        if txn_date >= month_start:
+                            month_revenue += txn.get("amount", 0)
+                except:
+                    pass
+        
+        for txn in all_matching_paid:
+            created_at = txn.get("createdAt")
+            if created_at:
+                try:
+                    if hasattr(created_at, 'tzinfo') and created_at.tzinfo is not None:
+                        txn_date = created_at
+                    else:
+                        txn_date = IST.localize(created_at) if created_at else None
+                    
+                    if txn_date and txn_date >= today_start:
+                        today_matching_paid_amount += txn.get("amount", 0)
+                except:
+                    pass
         
         # Recent transactions (all types)
         recent_transactions = []
