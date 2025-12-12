@@ -2566,7 +2566,7 @@ async def get_admin_earnings(current_admin: dict = Depends(get_current_admin)):
                 
                 # Today's stats
                 "todayRevenue": today_revenue,
-                "todayMatchingPaid": today_matching_paid,
+                "todayMatchingPaid": today_matching_paid_amount,
                 "monthRevenue": month_revenue,
                 
                 # Admin's personal earnings
