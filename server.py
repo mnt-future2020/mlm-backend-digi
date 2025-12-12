@@ -3153,6 +3153,13 @@ async def approve_topup(
         if not plan:
             raise HTTPException(status_code=404, detail="Plan not found")
         
+        # Get user details
+        user = users_collection.find_one({"_id": ObjectId(user_id)})
+        
+        # Get admin user for crediting plan activation amount
+        admin_user = users_collection.find_one({"role": "admin"})
+        admin_id = str(admin_user["_id"]) if admin_user else None
+        
         # Update user's current plan
         users_collection.update_one(
             {"_id": ObjectId(user_id)},
@@ -3166,15 +3173,31 @@ async def approve_topup(
             }
         )
         
-        # Create transaction for user
+        # Create PLAN_ACTIVATION transaction - this is ADMIN's REVENUE
         transactions_collection.insert_one({
-            "userId": user_id,
+            "userId": admin_id if admin_id else user_id,  # Credit to admin
+            "fromUserId": user_id,  # Track which user activated
             "type": "PLAN_ACTIVATION",
             "amount": plan["amount"],
-            "description": f"Activated {plan['name']} plan",
+            "description": f"{user.get('name', 'User')} activated {plan['name']} plan - ₹{plan['amount']}",
+            "planName": plan["name"],
             "status": "COMPLETED",
             "createdAt": get_ist_now()
         })
+        
+        # Update admin wallet with plan activation amount (REVENUE)
+        if admin_id:
+            wallets_collection.update_one(
+                {"userId": admin_id},
+                {
+                    "$inc": {
+                        "balance": plan["amount"],
+                        "totalEarnings": plan["amount"]
+                    },
+                    "$set": {"updatedAt": get_ist_now()}
+                },
+                upsert=True
+            )
         
         # Distribute PV upward in the binary tree
         pv_amount = plan.get("pv", 0)
