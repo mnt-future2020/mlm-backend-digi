@@ -686,8 +686,13 @@ def initialize_admin():
 @app.on_event("startup")
 async def startup_event():
     """Initialize database on startup"""
-    # Create indexes
-    users_collection.create_index([("email", ASCENDING)], unique=True, sparse=True)
+    # Create indexes - drop existing email index and recreate with sparse
+    try:
+        users_collection.drop_index("email_1")
+    except:
+        pass  # Index may not exist
+    
+    users_collection.create_index([("email", ASCENDING)], unique=True, sparse=True, name="email_1")
     users_collection.create_index([("username", ASCENDING)], unique=True)
     users_collection.create_index([("referralId", ASCENDING)], unique=True)
     users_collection.create_index([("mobile", ASCENDING)])
