@@ -2055,6 +2055,27 @@ async def get_public_settings():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/api/system/time")
+async def get_system_time():
+    """Get current system time (IST with offset)"""
+    try:
+        current_time = get_ist_now()
+        eod_time = get_eod_time()
+        offset = get_system_time_offset()
+        
+        return {
+            "success": True,
+            "data": {
+                "currentTime": current_time.isoformat(),
+                "currentTimeFormatted": current_time.strftime("%d-%m-%Y %I:%M:%S %p IST"),
+                "eodTime": eod_time,
+                "offsetMinutes": offset,
+                "timezone": "Asia/Kolkata"
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/api/settings")
 async def get_settings():
     """Get all settings (admin only)"""
