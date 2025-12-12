@@ -23,8 +23,99 @@ from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, 
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
 
-# Import auto-placement service
-from app.services.placement_service import get_auto_placement_position, get_placement_info_for_display
+# Auto-placement functions (moved from service to avoid import issues)
+
+def find_deepest_left_position(sponsor_id: str):
+    """Find the deepest LEFT-most available position in sponsor's LEFT leg"""
+    left_child = teams_collection.find_one({
+        "sponsorId": sponsor_id,
+        "placement": "LEFT"
+    })
+    
+    if not left_child:
+        return None
+    
+    current_user_id = left_child["userId"]
+    max_depth = 100
+    for _ in range(max_depth):
+        left_child = teams_collection.find_one({
+            "sponsorId": current_user_id,
+            "placement": "LEFT"
+        })
+        
+        if not left_child:
+            return current_user_id
+        
+        current_user_id = left_child["userId"]
+    
+    return current_user_id
+
+def find_deepest_right_position(sponsor_id: str):
+    """Find the deepest RIGHT-most available position in sponsor's RIGHT leg"""
+    right_child = teams_collection.find_one({
+        "sponsorId": sponsor_id,
+        "placement": "RIGHT"
+    })
+    
+    if not right_child:
+        return None
+    
+    current_user_id = right_child["userId"]
+    max_depth = 100
+    for _ in range(max_depth):
+        right_child = teams_collection.find_one({
+            "sponsorId": current_user_id,
+            "placement": "RIGHT"
+        })
+        
+        if not right_child:
+            return current_user_id
+        
+        current_user_id = right_child["userId"]
+    
+    return current_user_id
+
+def get_auto_placement_position(sponsor_id: str, preferred_placement: str):
+    """Get the actual placement position for a new user"""
+    if preferred_placement == "LEFT":
+        actual_sponsor = find_deepest_left_position(sponsor_id)
+        if actual_sponsor is None:
+            return sponsor_id, "LEFT"
+        else:
+            return actual_sponsor, "LEFT"
+    elif preferred_placement == "RIGHT":
+        actual_sponsor = find_deepest_right_position(sponsor_id)
+        if actual_sponsor is None:
+            return sponsor_id, "RIGHT"
+        else:
+            return actual_sponsor, "RIGHT"
+    else:
+        return sponsor_id, "LEFT"
+
+def get_placement_info_for_display(sponsor_id: str, preferred_placement: str):
+    """Get human-readable placement information for UI display"""
+    original_sponsor = users_collection.find_one({"_id": ObjectId(sponsor_id)})
+    if not original_sponsor:
+        return None
+    
+    actual_sponsor_id, placement = get_auto_placement_position(sponsor_id, preferred_placement)
+    actual_sponsor = users_collection.find_one({"_id": ObjectId(actual_sponsor_id)})
+    if not actual_sponsor:
+        return None
+    
+    is_direct = (sponsor_id == actual_sponsor_id)
+    
+    return {
+        "original_sponsor_id": sponsor_id,
+        "original_sponsor_name": original_sponsor.get("name", "Unknown"),
+        "original_sponsor_referral_id": original_sponsor.get("referralId", "Unknown"),
+        "actual_sponsor_id": actual_sponsor_id,
+        "actual_sponsor_name": actual_sponsor.get("name", "Unknown"),
+        "actual_sponsor_referral_id": actual_sponsor.get("referralId", "Unknown"),
+        "placement": placement,
+        "is_direct_placement": is_direct,
+        "message": f"Will be placed under {actual_sponsor.get('name')} on {placement} side"
+    }
 
 # Indian Standard Time timezone
 IST = pytz.timezone('Asia/Kolkata')
@@ -406,7 +497,7 @@ def initialize_plans():
                     "Basic Support"
                 ],
                 "isActive": True,
-                "createdAt": datetime.utcnow()
+                "createdAt": get_ist_now()
             },
             {
                 "name": "Standard",
@@ -424,7 +515,7 @@ def initialize_plans():
                 ],
                 "isActive": True,
                 "popular": True,
-                "createdAt": datetime.utcnow()
+                "createdAt": get_ist_now()
             },
             {
                 "name": "Advanced",
@@ -441,7 +532,7 @@ def initialize_plans():
                     "Priority Support"
                 ],
                 "isActive": True,
-                "createdAt": datetime.utcnow()
+                "createdAt": get_ist_now()
             },
             {
                 "name": "Premium",
@@ -458,7 +549,7 @@ def initialize_plans():
                     "VIP Support"
                 ],
                 "isActive": True,
-                "createdAt": datetime.utcnow()
+                "createdAt": get_ist_now()
             }
         ]
         plans_collection.insert_many(plans)
@@ -529,7 +620,7 @@ def initialize_admin():
             "username": os.getenv("ADMIN_USERNAME", "vsvadmin"),
             "email": admin_email,
             "password": hash_password(admin_password),
-            "mobile": "9999999999",
+            "mobile": "8807867028",
             "referralId": admin_referral_id,
             "role": "admin",
             "isActive": True,
@@ -540,8 +631,8 @@ def initialize_admin():
             "totalPV": 0,
             "leftPV": 0,
             "rightPV": 0,
-            "createdAt": datetime.utcnow(),
-            "updatedAt": datetime.utcnow()
+            "createdAt": get_ist_now(),
+            "updatedAt": get_ist_now()
         }
         
         result = users_collection.insert_one(admin_data)
@@ -552,8 +643,8 @@ def initialize_admin():
             "balance": 0,
             "totalEarnings": 0,
             "totalWithdrawals": 0,
-            "createdAt": datetime.utcnow(),
-            "updatedAt": datetime.utcnow()
+            "createdAt": get_ist_now(),
+            "updatedAt": get_ist_now()
         })
         
         print(f"✅ Admin user created - Email: {admin_email}, Password: {admin_password}")
@@ -631,7 +722,7 @@ async def register(user: UserRegister):
             "mobile": user.mobile,
             "referralId": referral_id,
             "role": "user",
-            "isActive": False,
+            "isActive": True,
             "isEmailVerified": False,
             "placement": user.placement,
             "sponsorId": user.referralId,
@@ -641,8 +732,8 @@ async def register(user: UserRegister):
             "totalPV": 0,
             "leftPV": 0,
             "rightPV": 0,
-            "createdAt": datetime.utcnow(),
-            "updatedAt": datetime.utcnow()
+            "createdAt": get_ist_now(),
+            "updatedAt": get_ist_now()
         }
         
         result = users_collection.insert_one(user_data)
@@ -654,8 +745,8 @@ async def register(user: UserRegister):
             "balance": 0,
             "totalEarnings": 0,
             "totalWithdrawals": 0,
-            "createdAt": datetime.utcnow(),
-            "updatedAt": datetime.utcnow()
+            "createdAt": get_ist_now(),
+            "updatedAt": get_ist_now()
         })
         
         # Add to team structure if has sponsor
@@ -666,7 +757,7 @@ async def register(user: UserRegister):
                 "sponsorId": actual_sponsor_id,  # This is the actual sponsor after auto-placement
                 "placement": actual_placement,    # This is the actual placement side
                 "level": 1,
-                "createdAt": datetime.utcnow()
+                "createdAt": get_ist_now()
             })
             
             # Distribute PV if plan is assigned (referral income system removed)
@@ -692,7 +783,7 @@ async def register(user: UserRegister):
                 #         "amount": referral_income,
                 #         "description": f"Referral income from {user.name} plan activation",
                 #         "status": "COMPLETED",
-                #         "createdAt": datetime.utcnow()
+                #         "createdAt": get_ist_now()
                 #     })
         
         # Create access token
@@ -909,7 +1000,7 @@ async def update_profile(
         # Fields that can be updated
         allowed_fields = ["name", "mobile", "email"]
         update_data = {k: v for k, v in data.items() if k in allowed_fields}
-        update_data["updatedAt"] = datetime.utcnow()
+        update_data["updatedAt"] = get_ist_now()
         
         users_collection.update_one(
             {"_id": ObjectId(current_user["id"])},
@@ -947,7 +1038,7 @@ async def change_password(
             {"_id": ObjectId(current_user["id"])},
             {"$set": {
                 "password": hash_password(new_password),
-                "updatedAt": datetime.utcnow()
+                "updatedAt": get_ist_now()
             }}
         )
         
@@ -1280,7 +1371,7 @@ async def get_team_list(current_user: dict = Depends(get_current_active_user)):
                     "currentPlan": plan_name,
                     "isActive": user.get("isActive", False),
                     "rank": user_rank,
-                    "joinedAt": user.get("createdAt", datetime.utcnow()).isoformat()
+                    "joinedAt": user.get("createdAt", get_ist_now()).isoformat()
                 })
         
         return {
@@ -1362,7 +1453,7 @@ async def get_all_teams(
                     "currentPlan": plan_name,
                     "isActive": user.get("isActive", False),
                     "rank": user_rank,
-                    "joinedAt": user.get("createdAt", datetime.utcnow()).isoformat(),
+                    "joinedAt": user.get("createdAt", get_ist_now()).isoformat(),
                     "sponsorName": sponsor["name"] if sponsor else "N/A",
                     "sponsorId": sponsor["referralId"] if sponsor else "N/A"
                 }
@@ -1503,7 +1594,7 @@ async def activate_plan(
                     "currentPlan": str(plan["_id"]),
                     "currentPlanName": plan["name"],
                     "dailyPVLimit": plan.get("dailyCapping", 500) // 25,  # Daily PV limit
-                    "updatedAt": datetime.utcnow()
+                    "updatedAt": get_ist_now()
                 }
             }
         )
@@ -1515,7 +1606,7 @@ async def activate_plan(
             "amount": plan["amount"],
             "description": f"Activated {plan['name']} plan",
             "status": "COMPLETED",
-            "createdAt": datetime.utcnow()
+            "createdAt": get_ist_now()
         })
         
         # Distribute PV upward in the binary tree
@@ -1537,7 +1628,7 @@ async def activate_plan(
         #                     "balance": plan["referralIncome"],
         #                     "totalEarnings": plan["referralIncome"]
         #                 },
-        #                 "$set": {"updatedAt": datetime.utcnow()}
+        #                 "$set": {"updatedAt": get_ist_now()}
         #             }
         #         )
         #         
@@ -1549,7 +1640,7 @@ async def activate_plan(
         #             "description": f"Referral income from {current_user['name']}",
         #             "status": "COMPLETED",
         #             "fromUser": user_id,
-        #             "createdAt": datetime.utcnow()
+        #             "createdAt": get_ist_now()
         #         })
         
         return {
@@ -1646,7 +1737,7 @@ def distribute_pv_upward(user_id: str, pv_amount: int):
                 {"_id": ObjectId(sponsor_id)},
                 {
                     "$inc": {update_field: pv_amount},
-                    "$set": {"updatedAt": datetime.utcnow()}
+                    "$set": {"updatedAt": get_ist_now()}
                 }
             )
             
@@ -1697,7 +1788,7 @@ def calculate_matching_income(user_id: str):
         matched_pv = min(left_pv, right_pv)
         
         # Check daily capping
-        today_date = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        today_date = get_ist_now().replace(hour=0, minute=0, second=0, microsecond=0)
         last_matching_date = user.get("lastMatchingDate")
         
         # Reset daily PV if new day
@@ -1730,7 +1821,7 @@ def calculate_matching_income(user_id: str):
                     "balance": income,
                     "totalEarnings": income
                 },
-                "$set": {"updatedAt": datetime.utcnow()}
+                "$set": {"updatedAt": get_ist_now()}
             }
         )
         
@@ -1742,7 +1833,7 @@ def calculate_matching_income(user_id: str):
             "description": f"Binary matching income - {today_pv} PV @ ₹{matching_income_rate}/PV",
             "pv": today_pv,
             "status": "COMPLETED",
-            "createdAt": datetime.utcnow()
+            "createdAt": get_ist_now()
         })
         
         # Flush matched PV from both sides
@@ -1757,7 +1848,7 @@ def calculate_matching_income(user_id: str):
                 "$set": {
                     "lastMatchingDate": today_date,
                     "dailyPVUsed": daily_pv_used + today_pv,
-                    "updatedAt": datetime.utcnow()
+                    "updatedAt": get_ist_now()
                 }
             }
         )
@@ -1854,7 +1945,7 @@ async def create_withdrawal_request(
             "amount": amount,
             "bankDetails": bank_details,
             "status": "PENDING",
-            "requestedAt": datetime.utcnow(),
+            "requestedAt": get_ist_now(),
             "processedAt": None,
             "processedBy": None
         }
@@ -1875,7 +1966,7 @@ async def create_withdrawal_request(
             "description": "Withdrawal request created",
             "status": "PENDING",
             "withdrawalId": str(result.inserted_id),
-            "createdAt": datetime.utcnow()
+            "createdAt": get_ist_now()
         })
         
         return {
@@ -1951,7 +2042,7 @@ async def update_general_settings(data: dict = Body(...)):
     try:
         settings_collection.update_one(
             {},
-            {"$set": {**data, "updatedAt": datetime.utcnow()}},
+            {"$set": {**data, "updatedAt": get_ist_now()}},
             upsert=True
         )
         return {"success": True, "message": "Settings updated successfully"}
@@ -1964,7 +2055,7 @@ async def update_seo_settings(data: dict = Body(...)):
     try:
         settings_collection.update_one(
             {},
-            {"$set": {**data, "updatedAt": datetime.utcnow()}},
+            {"$set": {**data, "updatedAt": get_ist_now()}},
             upsert=True
         )
         return {"success": True, "message": "SEO settings updated successfully"}
@@ -1977,7 +2068,7 @@ async def update_hero_settings(data: dict = Body(...)):
     try:
         settings_collection.update_one(
             {},
-            {"$set": {**data, "updatedAt": datetime.utcnow()}},
+            {"$set": {**data, "updatedAt": get_ist_now()}},
             upsert=True
         )
         return {"success": True, "message": "Hero settings updated successfully"}
@@ -2007,7 +2098,7 @@ async def update_email_config(data: dict = Body(...)):
     try:
         email_configs_collection.update_one(
             {},
-            {"$set": {**data, "updatedAt": datetime.utcnow()}},
+            {"$set": {**data, "updatedAt": get_ist_now()}},
             upsert=True
         )
         return {"success": True, "message": "Email configuration updated"}
@@ -2280,7 +2371,7 @@ async def update_user_status(
         
         users_collection.update_one(
             {"_id": ObjectId(user_id)},
-            {"$set": {"isActive": is_active, "updatedAt": datetime.utcnow()}}
+            {"$set": {"isActive": is_active, "updatedAt": get_ist_now()}}
         )
         
         return {
@@ -2329,7 +2420,7 @@ async def update_user(
                 update_data["currentPlan"] = None
         
         if update_data:
-            update_data["updatedAt"] = datetime.utcnow()
+            update_data["updatedAt"] = get_ist_now()
             users_collection.update_one(
                 {"_id": ObjectId(user_id)},
                 {"$set": update_data}
@@ -2363,7 +2454,7 @@ async def reset_user_password(
         hashed_password = hash_password(new_password)
         users_collection.update_one(
             {"_id": ObjectId(user_id)},
-            {"$set": {"password": hashed_password, "updatedAt": datetime.utcnow()}}
+            {"$set": {"password": hashed_password, "updatedAt": get_ist_now()}}
         )
         
         return {
@@ -2470,7 +2561,7 @@ async def approve_withdrawal(
             {
                 "$set": {
                     "status": "APPROVED",
-                    "processedAt": datetime.utcnow(),
+                    "processedAt": get_ist_now(),
                     "processedBy": current_admin["id"]
                 }
             }
@@ -2521,7 +2612,7 @@ async def reject_withdrawal(
                 "$set": {
                     "status": "REJECTED",
                     "rejectionReason": reason,
-                    "processedAt": datetime.utcnow(),
+                    "processedAt": get_ist_now(),
                     "processedBy": current_admin["id"]
                 }
             }
@@ -2570,8 +2661,8 @@ async def create_plan(
         plan_data = {
             **data,
             "isActive": data.get("isActive", True),
-            "createdAt": datetime.utcnow(),
-            "updatedAt": datetime.utcnow()
+            "createdAt": get_ist_now(),
+            "updatedAt": get_ist_now()
         }
         
         result = plans_collection.insert_one(plan_data)
@@ -2592,7 +2683,7 @@ async def update_plan(
 ):
     """Update plan"""
     try:
-        data["updatedAt"] = datetime.utcnow()
+        data["updatedAt"] = get_ist_now()
         
         plans_collection.update_one(
             {"_id": ObjectId(plan_id)},
@@ -2735,7 +2826,7 @@ async def approve_topup(
                     "currentPlan": str(plan["_id"]),
                     "currentPlanName": plan["name"],
                     "dailyPVLimit": plan.get("dailyCapping", 500) // 25,
-                    "updatedAt": datetime.utcnow()
+                    "updatedAt": get_ist_now()
                 }
             }
         )
@@ -2747,7 +2838,7 @@ async def approve_topup(
             "amount": plan["amount"],
             "description": f"Activated {plan['name']} plan",
             "status": "COMPLETED",
-            "createdAt": datetime.utcnow()
+            "createdAt": get_ist_now()
         })
         
         # Distribute PV upward in the binary tree
@@ -2829,7 +2920,7 @@ async def reject_topup(
             {
                 "$set": {
                     "status": "REJECTED",
-                    "rejectedAt": datetime.utcnow(),
+                    "rejectedAt": get_ist_now(),
                     "rejectedBy": current_admin["id"],
                     "rejectionReason": reason
                 }
@@ -2903,7 +2994,7 @@ async def get_dashboard_reports(
             plan_distribution[plan["name"]] = count
         
         # Recent registrations (last 7 days)
-        seven_days_ago = datetime.utcnow() - timedelta(days=7)
+        seven_days_ago = get_ist_now() - timedelta(days=7)
         recent_registrations = users_collection.count_documents({
             "role": "user",
             "createdAt": {"$gte": seven_days_ago}
@@ -2912,7 +3003,7 @@ async def get_dashboard_reports(
         # Daily business report (last 7 days)
         daily_reports = []
         for i in range(6, -1, -1):
-            day_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=i)
+            day_start = get_ist_now().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=i)
             day_end = day_start + timedelta(days=1)
             
             # New users on this day
@@ -4123,16 +4214,16 @@ async def health_check():
         return {
             "status": "healthy",
             "database": "connected",
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": get_ist_now().isoformat()
         }
     except Exception as e:
         return {
             "status": "unhealthy",
             "database": "disconnected",
             "error": str(e),
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": get_ist_now().isoformat()
         }
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=5000)
+    uvicorn.run("server:app", host="0.0.0.0", port=8001, reload=True)

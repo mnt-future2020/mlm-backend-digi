@@ -6,7 +6,7 @@ import re
 class UserRegister(BaseModel):
     name: str = Field(..., min_length=2, max_length=100)
     username: str = Field(..., min_length=3, max_length=50)
-    email: EmailStr
+    email: Optional[EmailStr] = None
     password: str = Field(..., min_length=6)
     mobile: str = Field(..., pattern=r'^[0-9]{10}$')
     referralId: str = Field(..., description="Sponsor's referral ID")
@@ -20,7 +20,8 @@ class UserRegister(BaseModel):
         return v
 
 class UserLogin(BaseModel):
-    email: EmailStr
+    email: Optional[EmailStr] = None
+    username: Optional[str] = None
     password: str
 
 class UserUpdate(BaseModel):

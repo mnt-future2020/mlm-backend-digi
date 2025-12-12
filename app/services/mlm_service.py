@@ -44,7 +44,7 @@ def distribute_pv_upward(user_id: str, pv_amount: int):
                 {"_id": ObjectId(sponsor_id)},
                 {
                     "$inc": {update_field: pv_amount},
-                    "$set": {"updatedAt": datetime.utcnow()}
+                    "$set": {"updatedAt": datetime.now(IST)}
                 }
             )
             
@@ -212,7 +212,7 @@ def add_user_to_binary_tree(user_id: str, sponsor_id: str, placement: str):
             "userId": user_id,
             "sponsorId": sponsor_id,
             "placement": placement.upper(),
-            "createdAt": datetime.utcnow()
+            "createdAt": datetime.now(IST)
         })
         return True
     except Exception as e:

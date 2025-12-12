@@ -73,6 +73,6 @@ typing_extensions==4.15.0
 tzdata==2025.2
 urllib3==2.5.0
 uvicorn==0.32.1
-uvloop==0.22.1
+# uvloop not supported on Windows
 watchfiles==1.1.1
 websockets==15.0.1
