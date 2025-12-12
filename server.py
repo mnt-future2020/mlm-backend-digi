@@ -751,11 +751,10 @@ async def register(user: UserRegister):
             if not plan:
                 raise HTTPException(status_code=400, detail="Invalid plan ID")
         
-        # Create user
+        # Create user - only include email if provided (for sparse index to work)
         user_data = {
             "name": user.name,
             "username": user.username,
-            "email": user.email,
             "password": hash_password(user.password),
             "mobile": user.mobile,
             "referralId": referral_id,
@@ -773,6 +772,10 @@ async def register(user: UserRegister):
             "createdAt": get_ist_now(),
             "updatedAt": get_ist_now()
         }
+        
+        # Only add email field if it has a value (for sparse unique index)
+        if user.email:
+            user_data["email"] = user.email
         
         result = users_collection.insert_one(user_data)
         user_id = str(result.inserted_id)
