@@ -2507,6 +2507,9 @@ async def get_admin_earnings(current_admin: dict = Depends(get_current_admin)):
                 except:
                     pass
             
+            # Check if this is admin's own transaction
+            is_admin_txn = user_id == admin_id
+            
             recent_transactions.append({
                 "id": str(txn["_id"]),
                 "type": txn.get("type"),
@@ -2514,28 +2517,50 @@ async def get_admin_earnings(current_admin: dict = Depends(get_current_admin)):
                 "userReferralId": user.get("referralId") if user else "-",
                 "amount": txn.get("amount"),
                 "description": txn.get("description"),
-                "createdAt": txn.get("createdAt")
+                "createdAt": txn.get("createdAt"),
+                "isAdminTransaction": is_admin_txn
             })
         
         return {
             "success": True,
             "data": {
-                "totalRevenue": total_revenue,
-                "totalEarnings": total_revenue,
+                # Platform Stats
+                "totalRevenue": total_platform_revenue,
+                "totalPayouts": total_payouts,
                 "netProfit": net_profit,
+                
+                # Payout breakdown
                 "totalMatchingPaid": total_matching_paid,
+                "totalReferralPaid": total_referral_paid,
+                "totalLevelPaid": total_level_paid,
+                
+                # Today's stats
                 "todayRevenue": today_revenue,
                 "todayMatchingPaid": today_matching_paid,
                 "monthRevenue": month_revenue,
+                
+                # Admin's personal earnings
+                "adminWallet": {
+                    "balance": admin_wallet_balance,
+                    "totalEarnings": admin_total_earnings,
+                    "totalWithdrawals": admin_total_withdrawals
+                },
+                "adminEarnings": admin_earnings_breakdown,
+                
+                # Admin's PV stats
                 "adminPV": {
                     "leftPV": admin_left_pv,
                     "rightPV": admin_right_pv,
                     "totalPV": admin_total_pv,
                     "matchablePV": min(admin_left_pv, admin_right_pv)
                 },
+                
+                # Breakdowns
                 "incomeBreakdown": income_breakdown,
                 "totalActivations": len(all_activations),
                 "incomeByPlan": income_by_plan,
+                
+                # Transactions
                 "recentTransactions": serialize_doc(recent_transactions),
                 "allTransactions": serialize_doc(all_activations)
             }
