@@ -803,6 +803,36 @@ async def register(user: UserRegister):
             
             # Distribute PV if plan is assigned (referral income system removed)
             if plan:
+                # Get admin user for crediting plan activation amount
+                admin_user = users_collection.find_one({"role": "admin"})
+                admin_id = str(admin_user["_id"]) if admin_user else None
+                
+                # Create PLAN_ACTIVATION transaction - ADMIN's REVENUE
+                transactions_collection.insert_one({
+                    "userId": admin_id if admin_id else user_id,  # Credit to admin
+                    "fromUserId": user_id,  # Track which user activated
+                    "type": "PLAN_ACTIVATION",
+                    "amount": plan["amount"],
+                    "description": f"{user.name} activated {plan['name']} plan - ₹{plan['amount']}",
+                    "planName": plan["name"],
+                    "status": "COMPLETED",
+                    "createdAt": get_ist_now()
+                })
+                
+                # Update admin wallet with plan activation amount (REVENUE)
+                if admin_id:
+                    wallets_collection.update_one(
+                        {"userId": admin_id},
+                        {
+                            "$inc": {
+                                "balance": plan["amount"],
+                                "totalEarnings": plan["amount"]
+                            },
+                            "$set": {"updatedAt": get_ist_now()}
+                        },
+                        upsert=True
+                    )
+                
                 # Distribute PV upward in binary tree
                 pv_amount = plan.get("pv", 0)
                 if pv_amount > 0:
