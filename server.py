@@ -462,17 +462,19 @@ class UserRegister(BaseModel):
     planId: Optional[str] = None  # Optional plan assignment during registration
     
     @field_validator('placement')
+    @classmethod
     def validate_placement(cls, v):
         if v and v not in ['LEFT', 'RIGHT']:
             raise ValueError('Placement must be LEFT or RIGHT')
         return v
     
-    @field_validator('email')
+    @field_validator('email', mode='before')
+    @classmethod
     def validate_email(cls, v):
-        # Allow empty string or None
-        if v is None or v == '' or v.strip() == '':
+        # Allow empty string or None - convert to None
+        if v is None or v == '' or (isinstance(v, str) and v.strip() == ''):
             return None
-        # Basic email validation if provided
+        return v
         if '@' not in v:
             raise ValueError('Invalid email format')
         return v
