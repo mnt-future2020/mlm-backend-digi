@@ -2381,7 +2381,7 @@ async def get_admin_dashboard(current_admin: dict = Depends(get_current_admin)):
 
 @app.get("/api/admin/earnings")
 async def get_admin_earnings(current_admin: dict = Depends(get_current_admin)):
-    """Get admin earnings - platform revenue from plan activations"""
+    """Get admin earnings - platform revenue and admin's personal earnings"""
     try:
         admin_id = current_admin["id"]
         
@@ -2391,29 +2391,81 @@ async def get_admin_earnings(current_admin: dict = Depends(get_current_admin)):
         admin_right_pv = admin_user.get("rightPV", 0) if admin_user else 0
         admin_total_pv = admin_user.get("totalPV", 0) if admin_user else 0
         
-        # Get all plan activation transactions (platform revenue)
+        # Get admin's wallet
+        admin_wallet = wallets_collection.find_one({"userId": admin_id})
+        admin_wallet_balance = admin_wallet.get("balance", 0) if admin_wallet else 0
+        admin_total_earnings = admin_wallet.get("totalEarnings", 0) if admin_wallet else 0
+        admin_total_withdrawals = admin_wallet.get("totalWithdrawals", 0) if admin_wallet else 0
+        
+        # ============ PLATFORM REVENUE (ALL PLAN ACTIVATIONS) ============
         all_activations = list(transactions_collection.find({
             "type": "PLAN_ACTIVATION"
         }).sort("createdAt", DESCENDING))
         
-        # Calculate total revenue from plan activations
-        total_revenue = sum(txn.get("amount", 0) for txn in all_activations)
+        total_platform_revenue = sum(txn.get("amount", 0) for txn in all_activations)
         
-        # Get all matching income paid to users (payouts)
-        all_matching = list(transactions_collection.find({
+        # ============ ADMIN'S OWN EARNINGS ============
+        # Admin's matching income (admin's personal binary matching)
+        admin_matching_txns = list(transactions_collection.find({
+            "userId": admin_id,
             "type": "MATCHING_INCOME"
         }).sort("createdAt", DESCENDING))
+        admin_matching_income = sum(txn.get("amount", 0) for txn in admin_matching_txns)
         
-        total_matching_paid = sum(txn.get("amount", 0) for txn in all_matching)
+        # Admin's referral income (if any - currently disabled)
+        admin_referral_txns = list(transactions_collection.find({
+            "userId": admin_id,
+            "type": "REFERRAL_INCOME"
+        }).sort("createdAt", DESCENDING))
+        admin_referral_income = sum(txn.get("amount", 0) for txn in admin_referral_txns)
         
-        # Net Profit = Total Revenue - Matching Income Paid
-        net_profit = total_revenue - total_matching_paid
+        # Admin's level income (if any)
+        admin_level_txns = list(transactions_collection.find({
+            "userId": admin_id,
+            "type": "LEVEL_INCOME"
+        }).sort("createdAt", DESCENDING))
+        admin_level_income = sum(txn.get("amount", 0) for txn in admin_level_txns)
+        
+        # ============ TOTAL PAYOUTS TO ALL USERS ============
+        all_matching_paid = list(transactions_collection.find({
+            "type": "MATCHING_INCOME"
+        }).sort("createdAt", DESCENDING))
+        total_matching_paid = sum(txn.get("amount", 0) for txn in all_matching_paid)
+        
+        all_referral_paid = list(transactions_collection.find({
+            "type": "REFERRAL_INCOME"
+        }))
+        total_referral_paid = sum(txn.get("amount", 0) for txn in all_referral_paid)
+        
+        all_level_paid = list(transactions_collection.find({
+            "type": "LEVEL_INCOME"
+        }))
+        total_level_paid = sum(txn.get("amount", 0) for txn in all_level_paid)
+        
+        total_payouts = total_matching_paid + total_referral_paid + total_level_paid
+        
+        # Net Profit = Platform Revenue - Total Payouts
+        net_profit = total_platform_revenue - total_payouts
+        
+        # Admin's total personal earnings
+        admin_personal_earnings = admin_matching_income + admin_referral_income + admin_level_income
         
         # Income breakdown
         income_breakdown = {
-            "PLAN_ACTIVATION": total_revenue,
-            "MATCHING_INCOME": total_matching_paid,
+            "PLAN_ACTIVATION": total_platform_revenue,
+            "MATCHING_INCOME_PAID": total_matching_paid,
+            "REFERRAL_INCOME_PAID": total_referral_paid,
+            "LEVEL_INCOME_PAID": total_level_paid,
+            "TOTAL_PAYOUTS": total_payouts,
             "NET_PROFIT": net_profit
+        }
+        
+        # Admin's personal earnings breakdown
+        admin_earnings_breakdown = {
+            "MATCHING_INCOME": admin_matching_income,
+            "REFERRAL_INCOME": admin_referral_income,
+            "LEVEL_INCOME": admin_level_income,
+            "TOTAL": admin_personal_earnings
         }
         
         # Plan activation breakdown by plan name
@@ -2430,7 +2482,7 @@ async def get_admin_earnings(current_admin: dict = Depends(get_current_admin)):
         today_activations = [t for t in all_activations if t.get("createdAt") and t.get("createdAt") >= today_start]
         today_revenue = sum(txn.get("amount", 0) for txn in today_activations)
         
-        today_matching = [t for t in all_matching if t.get("createdAt") and t.get("createdAt") >= today_start]
+        today_matching = [t for t in all_matching_paid if t.get("createdAt") and t.get("createdAt") >= today_start]
         today_matching_paid = sum(txn.get("amount", 0) for txn in today_matching)
         
         # This month calculations
@@ -2438,14 +2490,15 @@ async def get_admin_earnings(current_admin: dict = Depends(get_current_admin)):
         month_activations = [t for t in all_activations if t.get("createdAt") and t.get("createdAt") >= month_start]
         month_revenue = sum(txn.get("amount", 0) for txn in month_activations)
         
-        # Recent transactions (plan activations + matching income paid)
+        # Recent transactions (all types)
         recent_transactions = []
         
-        # Combine and sort all transactions
-        all_transactions = all_activations + all_matching
-        all_transactions.sort(key=lambda x: x.get("createdAt", datetime.min), reverse=True)
+        # Get all income transactions
+        all_income_txns = list(transactions_collection.find({
+            "type": {"$in": ["PLAN_ACTIVATION", "MATCHING_INCOME", "REFERRAL_INCOME", "LEVEL_INCOME"]}
+        }).sort("createdAt", DESCENDING).limit(50))
         
-        for txn in all_transactions[:30]:  # Last 30 transactions
+        for txn in all_income_txns:
             user = None
             user_id = txn.get("userId")
             if user_id:
