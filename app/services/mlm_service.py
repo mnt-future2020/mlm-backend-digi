@@ -149,16 +149,16 @@ def calculate_matching_income(user_id: str):
         # Flush matched PV from both sides
         # Note: We deduct matched_pv (not today_pv) to properly flush the matched pairs
         # Even if daily capping limits income, the matched PV should be removed
-        # Example: left=12, right=14, matched=12, daily_cap=10
-        # Income = 10 * 25 = 250, but we flush 12 from each side
-        # Result: left=0, right=2
+        # Example: left=14, right=37, matched=14, daily_cap=10
+        # Income = 10 * 25 = ₹250, but we flush 14 from each side
+        # Result: left=0, right=23, totalPV+=14, dailyPVUsed=10
         users_collection.update_one(
             {"_id": ObjectId(user_id)},
             {
                 "$inc": {
                     "leftPV": -matched_pv,
                     "rightPV": -matched_pv,
-                    "totalPV": today_pv
+                    "totalPV": matched_pv  # totalPV = lifetime PV matched (not capped)
                 },
                 "$set": {
                     "lastMatchingDate": today_date,
