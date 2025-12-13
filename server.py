@@ -4549,13 +4549,15 @@ async def calculate_daily_matching_income(current_admin: dict = Depends(get_curr
                 })
                 
                 # Flush matched PV from both sides
+                # Note: Flush matched_pv (not today_pv) to properly remove matched pairs
+                # Add matched_pv to totalPV (lifetime matched), not today_pv (capped amount)
                 users_collection.update_one(
                     {"_id": user["_id"]},
                     {
                         "$inc": {
-                            "leftPV": -today_pv,
-                            "rightPV": -today_pv,
-                            "totalPV": today_pv
+                            "leftPV": -matched_pv,
+                            "rightPV": -matched_pv,
+                            "totalPV": matched_pv  # totalPV = lifetime PV matched (not capped)
                         },
                         "$set": {
                             "lastMatchingDate": today_date,
