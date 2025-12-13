@@ -1859,12 +1859,8 @@ def calculate_matching_income(user_id: str):
     """
     try:
         user = users_collection.find_one({"_id": ObjectId(user_id)})
-        if not user:
-            print(f"[DEBUG] User {user_id} not found")
-            return
-        if not user.get("currentPlan"):
-            print(f"[DEBUG] User {user_id} has no current plan")
-            return
+        if not user or not user.get("currentPlan"):
+            return  # User must have an active plan
         
         # Get user's current PV
         left_pv = user.get("leftPV", 0)
