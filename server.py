@@ -5279,6 +5279,276 @@ async def reject_kyc(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ==================== WEAK MEMBER REPORT ====================
+
+@app.get("/api/tree/weak-members/{user_id}")
+async def get_weak_members_report(
+    user_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get weak members report for a user's downline tree"""
+    try:
+        # Find the target user (can be referralId or ObjectId)
+        try:
+            target_user = users_collection.find_one({"_id": ObjectId(user_id)})
+        except:
+            target_user = users_collection.find_one({"referralId": user_id})
+        
+        if not target_user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        target_user_id = str(target_user["_id"])
+        
+        # Get all downline members recursively
+        def get_all_downline(parent_id, side=None, depth=0, max_depth=10):
+            if depth > max_depth:
+                return []
+            
+            members = []
+            
+            # Get direct children
+            children = list(teams_collection.find({"sponsorId": parent_id}))
+            
+            for child in children:
+                child_user = users_collection.find_one({"_id": ObjectId(child["userId"])})
+                if child_user:
+                    child_side = child.get("placement", "UNKNOWN")
+                    members.append({
+                        "user": child_user,
+                        "side": child_side if depth == 0 else side,  # Track original side from root
+                        "depth": depth + 1
+                    })
+                    # Get their downline
+                    members.extend(get_all_downline(child["userId"], child_side if depth == 0 else side, depth + 1, max_depth))
+            
+            return members
+        
+        # Get all downline
+        all_downline = get_all_downline(target_user_id)
+        
+        # Analyze weakness
+        weak_members = []
+        
+        for member_data in all_downline:
+            member = member_data["user"]
+            side = member_data["side"]
+            
+            weakness_reasons = []
+            
+            # Check 1: No downline (no team members)
+            team_count = teams_collection.count_documents({"sponsorId": str(member["_id"])})
+            if team_count == 0:
+                weakness_reasons.append({
+                    "type": "NO_DOWNLINE",
+                    "message": "No team members under this user",
+                    "severity": "MEDIUM"
+                })
+            
+            # Check 2: Low PV
+            total_pv = member.get("totalPV", 0)
+            if total_pv == 0:
+                weakness_reasons.append({
+                    "type": "ZERO_PV",
+                    "message": "No Point Value accumulated",
+                    "severity": "HIGH"
+                })
+            elif total_pv < 100:
+                weakness_reasons.append({
+                    "type": "LOW_PV",
+                    "message": f"Low Point Value: {total_pv} PV",
+                    "severity": "MEDIUM"
+                })
+            
+            # Check 3: No plan activated
+            if not member.get("currentPlan") and not member.get("currentPlanId"):
+                weakness_reasons.append({
+                    "type": "NO_PLAN",
+                    "message": "No plan purchased/activated",
+                    "severity": "HIGH"
+                })
+            
+            # Check 4: Inactive status
+            if not member.get("isActive", False):
+                weakness_reasons.append({
+                    "type": "INACTIVE",
+                    "message": "Account is inactive",
+                    "severity": "CRITICAL"
+                })
+            
+            # Check 5: Unbalanced legs
+            left_pv = member.get("leftPV", 0)
+            right_pv = member.get("rightPV", 0)
+            if left_pv > 0 or right_pv > 0:
+                if left_pv == 0 or right_pv == 0:
+                    empty_side = "LEFT" if left_pv == 0 else "RIGHT"
+                    weakness_reasons.append({
+                        "type": "UNBALANCED_LEGS",
+                        "message": f"No members on {empty_side} side",
+                        "severity": "MEDIUM"
+                    })
+            
+            # If member has any weakness, add to report
+            if weakness_reasons:
+                # Get plan name
+                plan_name = None
+                if member.get("currentPlan"):
+                    try:
+                        plan = plans_collection.find_one({"_id": ObjectId(member["currentPlan"])})
+                        if plan:
+                            plan_name = plan.get("name")
+                    except:
+                        plan_name = member.get("currentPlan") if len(str(member.get("currentPlan", ""))) < 50 else None
+                
+                weak_members.append({
+                    "id": str(member["_id"]),
+                    "name": member.get("name"),
+                    "referralId": member.get("referralId"),
+                    "side": side,
+                    "totalPV": total_pv,
+                    "leftPV": left_pv,
+                    "rightPV": right_pv,
+                    "currentPlan": plan_name,
+                    "isActive": member.get("isActive", False),
+                    "profilePhoto": member.get("profilePhoto"),
+                    "joinedAt": member.get("createdAt"),
+                    "weaknessReasons": weakness_reasons,
+                    "overallSeverity": "CRITICAL" if any(r["severity"] == "CRITICAL" for r in weakness_reasons) else 
+                                       "HIGH" if any(r["severity"] == "HIGH" for r in weakness_reasons) else "MEDIUM"
+                })
+        
+        # Sort by severity (CRITICAL first, then HIGH, then MEDIUM)
+        severity_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2}
+        weak_members.sort(key=lambda x: severity_order.get(x["overallSeverity"], 3))
+        
+        # Group by side
+        left_weak = [m for m in weak_members if m["side"] == "LEFT"]
+        right_weak = [m for m in weak_members if m["side"] == "RIGHT"]
+        
+        return {
+            "success": True,
+            "data": {
+                "targetUser": {
+                    "id": target_user_id,
+                    "name": target_user.get("name"),
+                    "referralId": target_user.get("referralId")
+                },
+                "summary": {
+                    "totalWeakMembers": len(weak_members),
+                    "leftSideWeak": len(left_weak),
+                    "rightSideWeak": len(right_weak),
+                    "criticalCount": len([m for m in weak_members if m["overallSeverity"] == "CRITICAL"]),
+                    "highCount": len([m for m in weak_members if m["overallSeverity"] == "HIGH"]),
+                    "mediumCount": len([m for m in weak_members if m["overallSeverity"] == "MEDIUM"])
+                },
+                "weakMembers": serialize_doc(weak_members),
+                "leftSideWeak": serialize_doc(left_weak),
+                "rightSideWeak": serialize_doc(right_weak)
+            }
+        }
+        
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        print(f"Weak members report error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== USER PROFILE EDIT RESTRICTION ====================
+
+@app.put("/api/user/profile")
+async def update_user_profile(
+    data: dict = Body(...),
+    current_user: dict = Depends(get_current_user)
+):
+    """Update user profile - restricted after KYC approval"""
+    try:
+        user_id = current_user["id"]
+        user = users_collection.find_one({"_id": ObjectId(user_id)})
+        
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Check if user's KYC is approved (ACTIVE status)
+        if user.get("kycStatus") == "ACTIVE":
+            raise HTTPException(
+                status_code=403, 
+                detail="Profile cannot be edited after KYC approval. Please contact admin for changes."
+            )
+        
+        # Fields that can be updated before KYC approval
+        allowed_fields = ["name", "email", "mobile", "address"]
+        update_data = {}
+        
+        for field in allowed_fields:
+            if field in data:
+                update_data[field] = data[field]
+        
+        if not update_data:
+            raise HTTPException(status_code=400, detail="No valid fields to update")
+        
+        update_data["updatedAt"] = get_ist_now()
+        
+        users_collection.update_one(
+            {"_id": ObjectId(user_id)},
+            {"$set": update_data}
+        )
+        
+        return {
+            "success": True,
+            "message": "Profile updated successfully"
+        }
+        
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/api/admin/user/{user_id}/profile")
+async def admin_update_user_profile(
+    user_id: str,
+    data: dict = Body(...),
+    current_admin: dict = Depends(get_current_admin)
+):
+    """Admin can update any user's profile regardless of KYC status"""
+    try:
+        user = users_collection.find_one({"_id": ObjectId(user_id)})
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Admin can update these fields
+        allowed_fields = ["name", "email", "mobile", "address", "isActive", "kycStatus"]
+        update_data = {}
+        
+        for field in allowed_fields:
+            if field in data:
+                update_data[field] = data[field]
+        
+        # Also allow updating KYC data
+        if "kycData" in data:
+            update_data["kycData"] = data["kycData"]
+        
+        if not update_data:
+            raise HTTPException(status_code=400, detail="No valid fields to update")
+        
+        update_data["updatedAt"] = get_ist_now()
+        
+        users_collection.update_one(
+            {"_id": ObjectId(user_id)},
+            {"$set": update_data}
+        )
+        
+        return {
+            "success": True,
+            "message": f"User {user.get('name')} profile updated successfully by admin"
+        }
+        
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("server:app", host="0.0.0.0", port=8001, reload=True)
