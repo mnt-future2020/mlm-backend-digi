@@ -1275,6 +1275,7 @@ async def get_team_tree(current_user: dict = Depends(get_current_active_user)):
                 "leftPV": user.get("leftPV", 0),
                 "rightPV": user.get("rightPV", 0),
                 "totalPV": user.get("totalPV", 0),
+                "profilePhoto": user.get("profilePhoto"),
                 "left": None,
                 "right": None
             }
