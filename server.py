@@ -703,6 +703,11 @@ async def startup_event():
     teams_collection.create_index([("userId", ASCENDING)])
     teams_collection.create_index([("sponsorId", ASCENDING)])
     
+    # KYC indexes
+    kyc_submissions_collection.create_index([("userId", ASCENDING)])
+    kyc_submissions_collection.create_index([("status", ASCENDING)])
+    users_collection.create_index([("kycStatus", ASCENDING)])
+    
     # Initialize data
     initialize_plans()
     initialize_ranks()
