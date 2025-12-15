@@ -410,9 +410,8 @@ def parse_date_range(start_date: Optional[str], end_date: Optional[str]):
     return start, end
 
 # Get current user from token
-async def get_current_user(authorization: Optional[str] = None):
+async def get_current_user(authorization: Optional[str] = Header(None)):
     """Extract user from JWT token in Authorization header"""
-    from fastapi import Header
     
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(
