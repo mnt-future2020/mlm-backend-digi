@@ -4707,6 +4707,15 @@ async def submit_kyc(
         if size_kb > 500:
             raise HTTPException(status_code=400, detail=f"ID proof must be under 500KB. Current size: {size_kb:.1f}KB")
         
+        # Validate profile photo if provided (JPEG only, max 500KB)
+        profile_photo = data.get("profilePhotoBase64", "")
+        if profile_photo:
+            if not is_valid_jpeg(profile_photo):
+                raise HTTPException(status_code=400, detail="Profile photo must be a valid JPEG image")
+            photo_size_kb = get_base64_size_kb(profile_photo)
+            if photo_size_kb > 500:
+                raise HTTPException(status_code=400, detail=f"Profile photo must be under 500KB. Current size: {photo_size_kb:.1f}KB")
+        
         # Create KYC submission
         kyc_data = {
             "userId": user_id,
@@ -4725,6 +4734,7 @@ async def submit_kyc(
                 "bank": data.get("bank", {})
             },
             "idProofBase64": id_proof,
+            "profilePhotoBase64": profile_photo,
             "status": "SUBMITTED",
             "remarks": None,
             "createdAt": get_ist_now(),
