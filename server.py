@@ -753,6 +753,7 @@ async def register(user: UserRegister):
                 raise HTTPException(status_code=400, detail="Invalid plan ID")
         
         # Create user - only include email if provided (for sparse index to work)
+        # New users start with isActive=False and kycStatus=PENDING_KYC
         user_data = {
             "name": user.name,
             "username": user.username,
@@ -760,7 +761,8 @@ async def register(user: UserRegister):
             "mobile": user.mobile,
             "referralId": referral_id,
             "role": "user",
-            "isActive": True,
+            "isActive": False,  # User is inactive until KYC is approved
+            "kycStatus": "PENDING_KYC",  # KYC status flow: PENDING_KYC -> KYC_SUBMITTED -> ACTIVE/KYC_REJECTED
             "isEmailVerified": False,
             "placement": user.placement,
             "sponsorId": user.referralId,
