@@ -4627,6 +4627,612 @@ async def health_check():
             "timestamp": get_ist_now().isoformat()
         }
 
+
+# ==================== KYC ROUTES ====================
+
+def is_valid_jpeg(base64_data: str) -> bool:
+    """Validate if base64 data is a valid JPEG image"""
+    try:
+        import base64
+        # Remove data URL prefix if present
+        if ',' in base64_data:
+            base64_data = base64_data.split(',')[1]
+        
+        # Decode base64
+        image_data = base64.b64decode(base64_data)
+        
+        # Check JPEG magic bytes (FFD8FF)
+        return image_data[:3] == b'\xff\xd8\xff'
+    except Exception:
+        return False
+
+def get_base64_size_kb(base64_data: str) -> float:
+    """Get the size of base64 data in KB"""
+    try:
+        import base64
+        # Remove data URL prefix if present
+        if ',' in base64_data:
+            base64_data = base64_data.split(',')[1]
+        
+        # Decode and get size
+        image_data = base64.b64decode(base64_data)
+        return len(image_data) / 1024
+    except Exception:
+        return 0
+
+@app.post("/api/kyc/submit")
+async def submit_kyc(
+    data: dict = Body(...),
+    current_user: dict = Depends(get_current_user)
+):
+    """Submit KYC for the current user"""
+    try:
+        user_id = current_user["id"]
+        
+        # Check if user already has a pending/approved KYC
+        existing_kyc = kyc_submissions_collection.find_one({
+            "userId": user_id,
+            "status": {"$in": ["SUBMITTED", "APPROVED"]}
+        })
+        
+        if existing_kyc:
+            if existing_kyc["status"] == "APPROVED":
+                raise HTTPException(status_code=400, detail="KYC already approved")
+            raise HTTPException(status_code=400, detail="KYC already submitted and pending review")
+        
+        # Validate required fields
+        required_fields = ["name", "email", "phone", "address", "dob", "idNumber", "idProofBase64"]
+        for field in required_fields:
+            if not data.get(field):
+                raise HTTPException(status_code=400, detail=f"{field} is required")
+        
+        # Validate ID proof (JPEG only, max 500KB)
+        id_proof = data.get("idProofBase64", "")
+        if not is_valid_jpeg(id_proof):
+            raise HTTPException(status_code=400, detail="ID proof must be a valid JPEG image")
+        
+        size_kb = get_base64_size_kb(id_proof)
+        if size_kb > 500:
+            raise HTTPException(status_code=400, detail=f"ID proof must be under 500KB. Current size: {size_kb:.1f}KB")
+        
+        # Create KYC submission
+        kyc_data = {
+            "userId": user_id,
+            "submittedBy": {
+                "userId": user_id,
+                "role": "user"
+            },
+            "form": {
+                "name": data.get("name"),
+                "email": data.get("email"),
+                "phone": data.get("phone"),
+                "address": data.get("address"),
+                "sponsorReferralId": current_user.get("sponsorId", ""),
+                "dob": data.get("dob"),
+                "idNumber": data.get("idNumber"),
+                "bank": data.get("bank", {})
+            },
+            "idProofBase64": id_proof,
+            "status": "SUBMITTED",
+            "remarks": None,
+            "createdAt": get_ist_now(),
+            "updatedAt": get_ist_now()
+        }
+        
+        result = kyc_submissions_collection.insert_one(kyc_data)
+        
+        # Update user's KYC status
+        users_collection.update_one(
+            {"_id": ObjectId(user_id)},
+            {
+                "$set": {
+                    "kycStatus": "KYC_SUBMITTED",
+                    "kycSubmissionId": str(result.inserted_id),
+                    "updatedAt": get_ist_now()
+                }
+            }
+        )
+        
+        return {
+            "success": True,
+            "message": "KYC submitted successfully. Please wait for admin approval.",
+            "kycId": str(result.inserted_id)
+        }
+        
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        print(f"KYC submit error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/kyc/submit-for")
+async def submit_kyc_for_member(
+    data: dict = Body(...),
+    current_user: dict = Depends(get_current_user)
+):
+    """Submit KYC on behalf of a team member (sponsor or admin)"""
+    try:
+        target_referral_id = data.get("targetReferralId")
+        if not target_referral_id:
+            raise HTTPException(status_code=400, detail="targetReferralId is required")
+        
+        # Find target user
+        target_user = users_collection.find_one({"referralId": target_referral_id})
+        if not target_user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        target_user_id = str(target_user["_id"])
+        current_user_id = current_user["id"]
+        is_admin = current_user.get("role") == "admin"
+        
+        # Check if current user is sponsor of target user (if not admin)
+        if not is_admin:
+            # Check if target user is direct downline of current user
+            team_record = teams_collection.find_one({
+                "userId": target_user_id,
+                "sponsorId": current_user_id
+            })
+            if not team_record:
+                raise HTTPException(status_code=403, detail="You can only submit KYC for your direct downline members")
+        
+        # Check if target user already has pending/approved KYC
+        existing_kyc = kyc_submissions_collection.find_one({
+            "userId": target_user_id,
+            "status": {"$in": ["SUBMITTED", "APPROVED"]}
+        })
+        
+        if existing_kyc:
+            if existing_kyc["status"] == "APPROVED":
+                raise HTTPException(status_code=400, detail="KYC already approved for this user")
+            raise HTTPException(status_code=400, detail="KYC already submitted and pending review for this user")
+        
+        # Validate required fields
+        required_fields = ["name", "email", "phone", "address", "dob", "idNumber", "idProofBase64"]
+        for field in required_fields:
+            if not data.get(field):
+                raise HTTPException(status_code=400, detail=f"{field} is required")
+        
+        # Validate ID proof (JPEG only, max 500KB)
+        id_proof = data.get("idProofBase64", "")
+        if not is_valid_jpeg(id_proof):
+            raise HTTPException(status_code=400, detail="ID proof must be a valid JPEG image")
+        
+        size_kb = get_base64_size_kb(id_proof)
+        if size_kb > 500:
+            raise HTTPException(status_code=400, detail=f"ID proof must be under 500KB. Current size: {size_kb:.1f}KB")
+        
+        # Create KYC submission
+        kyc_data = {
+            "userId": target_user_id,
+            "submittedBy": {
+                "userId": current_user_id,
+                "role": "admin" if is_admin else "sponsor"
+            },
+            "sponsorId": current_user.get("referralId") if not is_admin else None,
+            "form": {
+                "name": data.get("name"),
+                "email": data.get("email"),
+                "phone": data.get("phone"),
+                "address": data.get("address"),
+                "sponsorReferralId": target_user.get("sponsorId", ""),
+                "dob": data.get("dob"),
+                "idNumber": data.get("idNumber"),
+                "bank": data.get("bank", {})
+            },
+            "idProofBase64": id_proof,
+            "status": "SUBMITTED",
+            "remarks": None,
+            "createdAt": get_ist_now(),
+            "updatedAt": get_ist_now()
+        }
+        
+        result = kyc_submissions_collection.insert_one(kyc_data)
+        
+        # Update target user's KYC status
+        users_collection.update_one(
+            {"_id": ObjectId(target_user_id)},
+            {
+                "$set": {
+                    "kycStatus": "KYC_SUBMITTED",
+                    "kycSubmissionId": str(result.inserted_id),
+                    "updatedAt": get_ist_now()
+                }
+            }
+        )
+        
+        return {
+            "success": True,
+            "message": f"KYC submitted successfully for {target_user.get('name')}. Pending admin approval.",
+            "kycId": str(result.inserted_id)
+        }
+        
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        print(f"KYC submit-for error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/kyc/me")
+async def get_my_kyc(current_user: dict = Depends(get_current_user)):
+    """Get current user's KYC status and last submission"""
+    try:
+        user_id = current_user["id"]
+        
+        # Get fresh user data
+        user = users_collection.find_one({"_id": ObjectId(user_id)})
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        kyc_status = user.get("kycStatus", "PENDING_KYC")
+        
+        # Get latest KYC submission
+        latest_kyc = kyc_submissions_collection.find_one(
+            {"userId": user_id},
+            sort=[("createdAt", DESCENDING)]
+        )
+        
+        return {
+            "success": True,
+            "data": {
+                "kycStatus": kyc_status,
+                "isActive": user.get("isActive", False),
+                "submission": serialize_doc(latest_kyc) if latest_kyc else None
+            }
+        }
+        
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/kyc/pending-members")
+async def get_pending_kyc_members(current_user: dict = Depends(get_current_user)):
+    """Get list of direct downline members with pending KYC (for sponsors)"""
+    try:
+        user_id = current_user["id"]
+        
+        # Get direct downline members
+        team_members = list(teams_collection.find({"sponsorId": user_id}))
+        member_ids = [ObjectId(m["userId"]) for m in team_members]
+        
+        # Get members with PENDING_KYC or KYC_REJECTED status
+        pending_members = list(users_collection.find({
+            "_id": {"$in": member_ids},
+            "kycStatus": {"$in": ["PENDING_KYC", "KYC_REJECTED"]}
+        }))
+        
+        result = []
+        for member in pending_members:
+            # Get latest KYC submission if any
+            latest_kyc = kyc_submissions_collection.find_one(
+                {"userId": str(member["_id"])},
+                sort=[("createdAt", DESCENDING)]
+            )
+            
+            result.append({
+                "id": str(member["_id"]),
+                "name": member.get("name"),
+                "referralId": member.get("referralId"),
+                "mobile": member.get("mobile"),
+                "email": member.get("email"),
+                "kycStatus": member.get("kycStatus", "PENDING_KYC"),
+                "lastKycRemarks": latest_kyc.get("remarks") if latest_kyc else None,
+                "createdAt": member.get("createdAt")
+            })
+        
+        return {
+            "success": True,
+            "data": serialize_doc(result)
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Admin KYC Routes
+@app.get("/api/admin/kyc/pending")
+async def get_pending_kyc_submissions(
+    current_admin: dict = Depends(get_current_admin),
+    search: Optional[str] = None,
+    page: int = 1,
+    pageSize: int = 20
+):
+    """Get all pending KYC submissions (admin only)"""
+    try:
+        # Build query
+        query = {"status": "SUBMITTED"}
+        
+        # Get all pending submissions
+        skip = (page - 1) * pageSize
+        submissions = list(kyc_submissions_collection.find(query)
+                          .sort("createdAt", DESCENDING)
+                          .skip(skip)
+                          .limit(pageSize))
+        
+        total = kyc_submissions_collection.count_documents(query)
+        
+        # Enrich with user data
+        result = []
+        for submission in submissions:
+            user = users_collection.find_one({"_id": ObjectId(submission["userId"])})
+            if user:
+                # Apply search filter
+                if search:
+                    search_lower = search.lower()
+                    if not (search_lower in user.get("name", "").lower() or
+                            search_lower in user.get("referralId", "").lower() or
+                            search_lower in submission.get("form", {}).get("name", "").lower()):
+                        continue
+                
+                result.append({
+                    "id": str(submission["_id"]),
+                    "userId": submission["userId"],
+                    "userName": user.get("name"),
+                    "userReferralId": user.get("referralId"),
+                    "userMobile": user.get("mobile"),
+                    "form": submission.get("form"),
+                    "submittedBy": submission.get("submittedBy"),
+                    "status": submission.get("status"),
+                    "createdAt": submission.get("createdAt")
+                })
+        
+        return {
+            "success": True,
+            "data": {
+                "submissions": serialize_doc(result),
+                "total": total,
+                "page": page,
+                "pageSize": pageSize
+            }
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/admin/kyc/all")
+async def get_all_kyc_submissions(
+    current_admin: dict = Depends(get_current_admin),
+    status: Optional[str] = None,
+    search: Optional[str] = None,
+    page: int = 1,
+    pageSize: int = 20
+):
+    """Get all KYC submissions with optional filters (admin only)"""
+    try:
+        # Build query
+        query = {}
+        if status and status != "ALL":
+            query["status"] = status
+        
+        # Get submissions
+        skip = (page - 1) * pageSize
+        submissions = list(kyc_submissions_collection.find(query)
+                          .sort("createdAt", DESCENDING)
+                          .skip(skip)
+                          .limit(pageSize))
+        
+        total = kyc_submissions_collection.count_documents(query)
+        
+        # Enrich with user data
+        result = []
+        for submission in submissions:
+            user = users_collection.find_one({"_id": ObjectId(submission["userId"])})
+            if user:
+                # Apply search filter
+                if search:
+                    search_lower = search.lower()
+                    if not (search_lower in user.get("name", "").lower() or
+                            search_lower in user.get("referralId", "").lower() or
+                            search_lower in submission.get("form", {}).get("name", "").lower()):
+                        continue
+                
+                result.append({
+                    "id": str(submission["_id"]),
+                    "userId": submission["userId"],
+                    "userName": user.get("name"),
+                    "userReferralId": user.get("referralId"),
+                    "userMobile": user.get("mobile"),
+                    "form": submission.get("form"),
+                    "submittedBy": submission.get("submittedBy"),
+                    "status": submission.get("status"),
+                    "remarks": submission.get("remarks"),
+                    "createdAt": submission.get("createdAt"),
+                    "updatedAt": submission.get("updatedAt")
+                })
+        
+        return {
+            "success": True,
+            "data": {
+                "submissions": serialize_doc(result),
+                "total": total,
+                "page": page,
+                "pageSize": pageSize
+            }
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/admin/kyc/{kyc_id}")
+async def get_kyc_detail(
+    kyc_id: str,
+    current_admin: dict = Depends(get_current_admin)
+):
+    """Get KYC submission details (admin only)"""
+    try:
+        submission = kyc_submissions_collection.find_one({"_id": ObjectId(kyc_id)})
+        if not submission:
+            raise HTTPException(status_code=404, detail="KYC submission not found")
+        
+        user = users_collection.find_one({"_id": ObjectId(submission["userId"])})
+        
+        return {
+            "success": True,
+            "data": {
+                **serialize_doc(submission),
+                "user": serialize_doc(user) if user else None
+            }
+        }
+        
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/admin/kyc/approve")
+async def approve_kyc(
+    data: dict = Body(...),
+    current_admin: dict = Depends(get_current_admin)
+):
+    """Approve KYC submission (admin only)"""
+    try:
+        kyc_id = data.get("kycId")
+        remarks = data.get("remarks", "")
+        
+        if not kyc_id:
+            raise HTTPException(status_code=400, detail="kycId is required")
+        
+        # Get KYC submission
+        submission = kyc_submissions_collection.find_one({"_id": ObjectId(kyc_id)})
+        if not submission:
+            raise HTTPException(status_code=404, detail="KYC submission not found")
+        
+        if submission["status"] != "SUBMITTED":
+            raise HTTPException(status_code=400, detail=f"KYC already {submission['status'].lower()}")
+        
+        user_id = submission["userId"]
+        
+        # Update KYC submission
+        kyc_submissions_collection.update_one(
+            {"_id": ObjectId(kyc_id)},
+            {
+                "$set": {
+                    "status": "APPROVED",
+                    "remarks": remarks,
+                    "approvedBy": current_admin["id"],
+                    "approvedAt": get_ist_now(),
+                    "updatedAt": get_ist_now()
+                }
+            }
+        )
+        
+        # Update user - activate and set KYC status
+        users_collection.update_one(
+            {"_id": ObjectId(user_id)},
+            {
+                "$set": {
+                    "isActive": True,
+                    "kycStatus": "ACTIVE",
+                    "activatedAt": get_ist_now(),
+                    "updatedAt": get_ist_now()
+                }
+            }
+        )
+        
+        user = users_collection.find_one({"_id": ObjectId(user_id)})
+        
+        return {
+            "success": True,
+            "message": f"KYC approved for {user.get('name') if user else 'user'}. User is now active."
+        }
+        
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        print(f"KYC approve error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/admin/kyc/reject")
+async def reject_kyc(
+    data: dict = Body(...),
+    current_admin: dict = Depends(get_current_admin)
+):
+    """Reject KYC submission (admin only)"""
+    try:
+        kyc_id = data.get("kycId")
+        remarks = data.get("remarks")
+        
+        if not kyc_id:
+            raise HTTPException(status_code=400, detail="kycId is required")
+        
+        if not remarks:
+            raise HTTPException(status_code=400, detail="Rejection remarks are required")
+        
+        # Get KYC submission
+        submission = kyc_submissions_collection.find_one({"_id": ObjectId(kyc_id)})
+        if not submission:
+            raise HTTPException(status_code=404, detail="KYC submission not found")
+        
+        if submission["status"] != "SUBMITTED":
+            raise HTTPException(status_code=400, detail=f"KYC already {submission['status'].lower()}")
+        
+        user_id = submission["userId"]
+        
+        # Update KYC submission
+        kyc_submissions_collection.update_one(
+            {"_id": ObjectId(kyc_id)},
+            {
+                "$set": {
+                    "status": "REJECTED",
+                    "remarks": remarks,
+                    "rejectedBy": current_admin["id"],
+                    "rejectedAt": get_ist_now(),
+                    "updatedAt": get_ist_now()
+                }
+            }
+        )
+        
+        # Update user KYC status (user remains inactive)
+        users_collection.update_one(
+            {"_id": ObjectId(user_id)},
+            {
+                "$set": {
+                    "kycStatus": "KYC_REJECTED",
+                    "updatedAt": get_ist_now()
+                }
+            }
+        )
+        
+        user = users_collection.find_one({"_id": ObjectId(user_id)})
+        
+        return {
+            "success": True,
+            "message": f"KYC rejected for {user.get('name') if user else 'user'}. Reason: {remarks}"
+        }
+        
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        print(f"KYC reject error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/admin/kyc/stats")
+async def get_kyc_stats(current_admin: dict = Depends(get_current_admin)):
+    """Get KYC statistics (admin only)"""
+    try:
+        pending = kyc_submissions_collection.count_documents({"status": "SUBMITTED"})
+        approved = kyc_submissions_collection.count_documents({"status": "APPROVED"})
+        rejected = kyc_submissions_collection.count_documents({"status": "REJECTED"})
+        
+        # Users pending KYC (haven't submitted yet)
+        pending_users = users_collection.count_documents({
+            "role": "user",
+            "kycStatus": "PENDING_KYC"
+        })
+        
+        return {
+            "success": True,
+            "data": {
+                "pending": pending,
+                "approved": approved,
+                "rejected": rejected,
+                "pendingUsers": pending_users,
+                "total": pending + approved + rejected
+            }
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("server:app", host="0.0.0.0", port=8001, reload=True)
