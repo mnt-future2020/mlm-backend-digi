@@ -1625,6 +1625,7 @@ async def get_admin_team_tree(
                 "leftPV": user.get("leftPV", 0),
                 "rightPV": user.get("rightPV", 0),
                 "totalPV": user.get("totalPV", 0),
+                "profilePhoto": user.get("profilePhoto"),
                 "left": None,
                 "right": None
             }
