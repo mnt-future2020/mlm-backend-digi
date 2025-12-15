@@ -905,9 +905,17 @@ async def login_email(credentials: dict = Body(...)):
         if not verify_password(password, user["password"]):
             raise HTTPException(status_code=401, detail="Invalid credentials")
         
-        # Check if active
-        if not user.get("isActive", False):
-            raise HTTPException(status_code=403, detail="Account is inactive")
+        # Allow login for admin OR users with any KYC status (they will see KYC form if needed)
+        # Only block if isActive=False AND kycStatus is not in allowed states
+        kyc_status = user.get("kycStatus", "PENDING_KYC")
+        is_admin = user.get("role") == "admin"
+        
+        # Admin can always login, users need to have valid KYC status
+        if not is_admin and not user.get("isActive", False):
+            # Allow login for KYC-related statuses so they can complete/resubmit KYC
+            allowed_statuses = ["PENDING_KYC", "KYC_SUBMITTED", "KYC_REJECTED"]
+            if kyc_status not in allowed_statuses:
+                raise HTTPException(status_code=403, detail="Account is inactive")
         
         # Create token
         user_id = str(user["_id"])
