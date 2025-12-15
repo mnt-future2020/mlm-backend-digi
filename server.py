@@ -5065,6 +5065,34 @@ async def get_all_kyc_submissions(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/api/admin/kyc/stats")
+async def get_kyc_stats(current_admin: dict = Depends(get_current_admin)):
+    """Get KYC statistics (admin only)"""
+    try:
+        pending = kyc_submissions_collection.count_documents({"status": "SUBMITTED"})
+        approved = kyc_submissions_collection.count_documents({"status": "APPROVED"})
+        rejected = kyc_submissions_collection.count_documents({"status": "REJECTED"})
+        
+        # Users pending KYC (haven't submitted yet)
+        pending_users = users_collection.count_documents({
+            "role": "user",
+            "kycStatus": "PENDING_KYC"
+        })
+        
+        return {
+            "success": True,
+            "data": {
+                "pending": pending,
+                "approved": approved,
+                "rejected": rejected,
+                "pendingUsers": pending_users,
+                "total": pending + approved + rejected
+            }
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/api/admin/kyc/{kyc_id}")
 async def get_kyc_detail(
     kyc_id: str,
