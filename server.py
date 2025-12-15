@@ -1086,19 +1086,38 @@ async def update_profile(
     data: dict = Body(...),
     current_user: dict = Depends(get_current_active_user)
 ):
-    """Update user profile"""
+    """Update user profile - restricted after KYC approval"""
     try:
-        # Fields that can be updated
-        allowed_fields = ["name", "mobile", "email"]
+        user_id = current_user["id"]
+        user = users_collection.find_one({"_id": ObjectId(user_id)})
+        
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Check if user's KYC is approved (ACTIVE status) - restrict editing
+        if user.get("kycStatus") == "ACTIVE":
+            raise HTTPException(
+                status_code=403, 
+                detail="Profile cannot be edited after KYC approval. Please contact admin for changes."
+            )
+        
+        # Fields that can be updated before KYC approval
+        allowed_fields = ["name", "mobile", "email", "address"]
         update_data = {k: v for k, v in data.items() if k in allowed_fields}
+        
+        if not update_data:
+            raise HTTPException(status_code=400, detail="No valid fields to update")
+        
         update_data["updatedAt"] = get_ist_now()
         
         users_collection.update_one(
-            {"_id": ObjectId(current_user["id"])},
+            {"_id": ObjectId(user_id)},
             {"$set": update_data}
         )
         
         return {"success": True, "message": "Profile updated successfully"}
+    except HTTPException as he:
+        raise he
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
