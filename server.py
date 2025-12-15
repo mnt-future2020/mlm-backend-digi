@@ -5175,17 +5175,28 @@ async def approve_kyc(
             }
         )
         
-        # Update user - activate and set KYC status
+        # Update user - activate and set KYC status, also copy profile photo
+        profile_photo = submission.get("profilePhotoBase64", "")
+        kyc_form = submission.get("form", {})
+        
+        user_update_data = {
+            "isActive": True,
+            "kycStatus": "ACTIVE",
+            "activatedAt": get_ist_now(),
+            "updatedAt": get_ist_now()
+        }
+        
+        # Copy profile photo if present
+        if profile_photo:
+            user_update_data["profilePhoto"] = profile_photo
+        
+        # Copy KYC form data to user profile
+        if kyc_form:
+            user_update_data["kycData"] = kyc_form
+        
         users_collection.update_one(
             {"_id": ObjectId(user_id)},
-            {
-                "$set": {
-                    "isActive": True,
-                    "kycStatus": "ACTIVE",
-                    "activatedAt": get_ist_now(),
-                    "updatedAt": get_ist_now()
-                }
-            }
+            {"$set": user_update_data}
         )
         
         user = users_collection.find_one({"_id": ObjectId(user_id)})
