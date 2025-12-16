@@ -484,6 +484,11 @@ class UserLogin(BaseModel):
 class ReferralLookup(BaseModel):
     referralId: str
 
+class PlacementPreviewRequest(BaseModel):
+    referralId: str
+    placement: str
+
+
 class PasswordChange(BaseModel):
     oldPassword: str
     newPassword: str
@@ -723,6 +728,10 @@ async def register(user: UserRegister):
         # Check if user already exists
         if user.email and users_collection.find_one({"email": user.email}):
             raise HTTPException(status_code=400, detail="Email already registered")
+
+        # Check for maximum 3 accounts per mobile number
+        if users_collection.count_documents({"mobile": user.mobile}) >= 3:
+            raise HTTPException(status_code=400, detail="Maximum 3 accounts allowed per mobile number")
         
         if users_collection.find_one({"username": user.username}):
             raise HTTPException(status_code=400, detail="Username already taken")
@@ -809,60 +818,11 @@ async def register(user: UserRegister):
             })
             
             # Distribute PV if plan is assigned (referral income system removed)
-            if plan:
-                # Get admin user for crediting plan activation amount
-                admin_user = users_collection.find_one({"role": "admin"})
-                admin_id = str(admin_user["_id"]) if admin_user else None
-                
-                # Create PLAN_ACTIVATION transaction - ADMIN's REVENUE
-                transactions_collection.insert_one({
-                    "userId": admin_id if admin_id else user_id,  # Credit to admin
-                    "fromUserId": user_id,  # Track which user activated
-                    "type": "PLAN_ACTIVATION",
-                    "amount": plan["amount"],
-                    "description": f"{user.name} activated {plan['name']} plan - ₹{plan['amount']}",
-                    "planName": plan["name"],
-                    "status": "COMPLETED",
-                    "createdAt": get_ist_now()
-                })
-                
-                # Update admin wallet with plan activation amount (REVENUE)
-                if admin_id:
-                    wallets_collection.update_one(
-                        {"userId": admin_id},
-                        {
-                            "$inc": {
-                                "balance": plan["amount"],
-                                "totalEarnings": plan["amount"]
-                            },
-                            "$set": {"updatedAt": get_ist_now()}
-                        },
-                        upsert=True
-                    )
-                
-                # Distribute PV upward in binary tree
-                pv_amount = plan.get("pv", 0)
-                if pv_amount > 0:
-                    distribute_pv_upward(user_id, pv_amount)
-                
-                # REFERRAL INCOME REMOVED - No longer giving referral income to sponsor
-                # referral_income = plan.get("referralIncome", 0)
-                # if referral_income > 0:
-                #     # Update sponsor wallet
-                #     wallets_collection.update_one(
-                #         {"userId": str(sponsor["_id"])},
-                #         {"$inc": {"balance": referral_income, "totalEarnings": referral_income}}
-                #     )
-                #     
-                #     # Create transaction for sponsor
-                #     transactions_collection.insert_one({
-                #         "userId": str(sponsor["_id"]),
-                #         "type": "REFERRAL_INCOME",
-                #         "amount": referral_income,
-                #         "description": f"Referral income from {user.name} plan activation",
-                #         "status": "COMPLETED",
-                #         "createdAt": get_ist_now()
-                #     })
+            # LOGIC DEFERRED TO KYC APPROVAL:
+            # Plan activation and PV distribution will only happen when KYC is approved
+            # and user becomes ACTIVE.
+            pass
+
         
         # Create access token
         access_token = create_access_token(data={"sub": user.username, "userId": user_id})
@@ -987,21 +947,21 @@ async def login_username(credentials: dict = Body(...)):
 @app.post("/api/auth/lookup-referral")
 async def lookup_referral(data: ReferralLookup):
     """Lookup user by referral ID"""
-    try:
-        user = users_collection.find_one({"referralId": data.referralId})
-        if not user:
-            return {"success": False, "message": "Invalid referral ID"}
-        
+    user = users_collection.find_one({"referralId": data.referralId})
+    
+    if not user:
         return {
-            "success": True,
-            "data": {
-                "username": user["username"],
-                "email": user.get("email", ""),
-                "name": user["name"]
-            }
+            "success": False,
+            "message": "Referral ID not found"
         }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    
+    return {
+        "success": True,
+        "data": {
+            "name": user["name"],
+            "username": user["username"]
+        }
+    }
 
 @app.post("/api/auth/preview-placement")
 async def preview_placement(data: dict = Body(...)):
@@ -1221,6 +1181,48 @@ async def get_user_dashboard(current_user: dict = Depends(get_current_active_use
                 if plan:
                     current_plan = serialize_doc(plan)
         
+        # Get additional financial stats
+        # Get additional financial stats
+        try:
+            # 1. Today's Earnings
+            ist_now = get_ist_now()
+            start_of_day = ist_now.replace(hour=0, minute=0, second=0, microsecond=0)
+            
+            todays_transactions = list(transactions_collection.find({
+                "userId": user_id,
+                "amount": {"$gt": 0},
+                "createdAt": {"$gte": start_of_day.isoformat()}
+            }))
+            todays_earnings = sum(t.get("amount", 0) for t in todays_transactions)
+
+            # 2. Pending Withdrawals
+            pending_payouts = list(payout_requests_collection.find({
+                "userId": user_id,
+                "status": "PENDING"
+            }))
+            pending_withdrawals = sum(p.get("amount", 0) for p in pending_payouts)
+
+            # 3. Referral Income (REMOVED)
+            referral_income = 0
+            # referral_txns = list(transactions_collection.find({
+            #     "userId": user_id,
+            #     "type": "REFERRAL_BONUS"
+            # }))
+            # referral_income = sum(t.get("amount", 0) for t in referral_txns)
+
+            # 4. Matching Income
+            matching_txns = list(transactions_collection.find({
+                "userId": user_id,
+                "type": "MATCHING_BONUS"
+            }))
+            matching_income = sum(t.get("amount", 0) for t in matching_txns)
+        except Exception as e:
+            print(f"Error calculating stats: {e}")
+            todays_earnings = 0
+            pending_withdrawals = 0
+            referral_income = 0
+            matching_income = 0
+        
         # Get recent transactions (exclude PLAN_ACTIVATION)
         transactions = list(transactions_collection.find({
             "userId": user_id,
@@ -1234,7 +1236,13 @@ async def get_user_dashboard(current_user: dict = Depends(get_current_active_use
         return {
             "success": True,
             "data": {
-                "wallet": wallet_data,
+                "wallet": {
+                    **wallet_data,
+                    "todaysEarnings": todays_earnings,
+                    "pendingWithdrawals": pending_withdrawals,
+                    "referralIncome": referral_income,
+                    "matchingIncome": matching_income
+                },
                 "team": {
                     "total": total_team,
                     "left": left_team,
@@ -1242,6 +1250,8 @@ async def get_user_dashboard(current_user: dict = Depends(get_current_active_use
                 },
                 "currentPlan": current_plan,
                 "rank": user_rank,
+                "kycStatus": fresh_user.get("kycStatus", "PENDING_KYC"),
+                "isActive": fresh_user.get("isActive", False),
                 "recentTransactions": serialize_doc(transactions)
             }
         }
@@ -1254,7 +1264,7 @@ async def get_team_tree(current_user: dict = Depends(get_current_active_user)):
     try:
         user_id = current_user["id"]
         
-        def build_tree(parent_id, depth=0, max_depth=5):
+        def build_tree(parent_id, depth=0, max_depth=50):
             if depth > max_depth:
                 return None
             
@@ -1605,7 +1615,7 @@ async def get_admin_team_tree(
 ):
     """Get team tree for any user (admin only)"""
     try:
-        def build_tree(parent_id: str, depth=0, max_depth=5) -> dict:
+        def build_tree(parent_id: str, depth=0, max_depth=50) -> dict:
             if depth > max_depth:
                 return None
                 
@@ -1657,12 +1667,24 @@ async def get_admin_team_tree(
             
             return node
         
-        tree = build_tree(user_id)
+        # Find user by referralId or ObjectId
+        try:
+            target_user = users_collection.find_one({"_id": ObjectId(user_id)})
+        except:
+            target_user = users_collection.find_one({"referralId": user_id})
+        
+        if not target_user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        target_user_id = str(target_user["_id"])
+        tree = build_tree(target_user_id)
         
         return {
             "success": True,
             "data": serialize_doc(tree)
         }
+    except HTTPException as he:
+        raise he
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -2178,6 +2200,22 @@ async def create_withdrawal_request(
         if amount < minimum_withdraw_limit:
             raise HTTPException(status_code=400, detail=f"Minimum withdrawal amount is ₹{minimum_withdraw_limit}")
         
+        # Check if user has minimum 2 direct referrals
+        user = users_collection.find_one({"_id": ObjectId(current_user["id"])})
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        user_referral_id = user.get("referralId")
+        if user_referral_id:
+            # Count direct referrals (users who used this user's referral ID as sponsor)
+            direct_referrals_count = users_collection.count_documents({"sponsorId": user_referral_id})
+            
+            if direct_referrals_count < 2:
+                raise HTTPException(
+                    status_code=400, 
+                    detail=f"You need at least 2 direct referrals to request withdrawal. Current referrals: {direct_referrals_count}"
+                )
+        
         # Check wallet balance
         wallet = wallets_collection.find_one({"userId": current_user["id"]})
         if not wallet or wallet.get("balance", 0) < amount:
@@ -2505,18 +2543,19 @@ async def get_admin_earnings(current_admin: dict = Depends(get_current_admin)):
         
         # ============ ADMIN'S OWN EARNINGS ============
         # Admin's matching income (admin's personal binary matching)
+        # Ensure we only count positive values (credits), though matching income should always be positive
+        # Admin's matching income (admin's personal binary matching)
+        # Ensure we only count positive values (credits), though matching income should always be positive
         admin_matching_txns = list(transactions_collection.find({
             "userId": admin_id,
-            "type": "MATCHING_INCOME"
+            "type": {"$in": ["MATCHING_INCOME", "MATCHING_BONUS"]}
         }).sort("createdAt", DESCENDING))
-        admin_matching_income = sum(txn.get("amount", 0) for txn in admin_matching_txns)
         
-        # Admin's referral income (if any - currently disabled)
-        admin_referral_txns = list(transactions_collection.find({
-            "userId": admin_id,
-            "type": "REFERRAL_INCOME"
-        }).sort("createdAt", DESCENDING))
-        admin_referral_income = sum(txn.get("amount", 0) for txn in admin_referral_txns)
+        # Taking abs() just in case, but logically should be positive
+        admin_matching_income = sum(abs(txn.get("amount", 0)) for txn in admin_matching_txns)
+        
+        # Admin's referral income (REMOVED)
+        admin_referral_income = 0
         
         # Admin's level income (if any)
         admin_level_txns = list(transactions_collection.find({
@@ -2526,8 +2565,9 @@ async def get_admin_earnings(current_admin: dict = Depends(get_current_admin)):
         admin_level_income = sum(txn.get("amount", 0) for txn in admin_level_txns)
         
         # ============ TOTAL PAYOUTS TO ALL USERS ============
+        # ============ TOTAL PAYOUTS TO ALL USERS ============
         all_matching_paid = list(transactions_collection.find({
-            "type": "MATCHING_INCOME"
+            "type": {"$in": ["MATCHING_INCOME", "MATCHING_BONUS"]}
         }).sort("createdAt", DESCENDING))
         total_matching_paid = sum(txn.get("amount", 0) for txn in all_matching_paid)
         
@@ -2623,7 +2663,7 @@ async def get_admin_earnings(current_admin: dict = Depends(get_current_admin)):
         
         # Get all income transactions
         all_income_txns = list(transactions_collection.find({
-            "type": {"$in": ["PLAN_ACTIVATION", "MATCHING_INCOME", "REFERRAL_INCOME", "LEVEL_INCOME"]}
+            "type": {"$in": ["PLAN_ACTIVATION", "MATCHING_INCOME", "MATCHING_BONUS", "REFERRAL_INCOME", "LEVEL_INCOME"]}
         }).sort("createdAt", DESCENDING).limit(50))
         
         for txn in all_income_txns:
@@ -5181,6 +5221,51 @@ async def approve_kyc(
             raise HTTPException(status_code=400, detail=f"KYC already {submission['status'].lower()}")
         
         user_id = submission["userId"]
+        target_user = users_collection.find_one({"_id": ObjectId(user_id)})
+        
+        if target_user and not target_user.get("isActive", False):
+            # Check if user has a pending plan
+            if target_user.get("currentPlanId"): # Use currentPlanId to find the plan object
+                 try:
+                    plan = plans_collection.find_one({"_id": ObjectId(target_user["currentPlanId"])})
+                    if plan:
+                        # 1. Admin Revenue Logic
+                        admin_user = users_collection.find_one({"role": "admin"})
+                        admin_id = str(admin_user["_id"]) if admin_user else None
+                        
+                        # Create PLAN_ACTIVATION transaction
+                        transactions_collection.insert_one({
+                            "userId": admin_id if admin_id else user_id,  # Credit to admin
+                            "fromUserId": user_id,  # Track which user activated
+                            "type": "PLAN_ACTIVATION",
+                            "amount": plan["amount"],
+                            "description": f"{target_user['name']} activated {plan['name']} plan - ₹{plan['amount']}",
+                            "planName": plan["name"],
+                            "status": "COMPLETED",
+                            "createdAt": get_ist_now()
+                        })
+                        
+                        # Update admin wallet
+                        if admin_id:
+                            wallets_collection.update_one(
+                                {"userId": admin_id},
+                                {
+                                    "$inc": {
+                                        "balance": plan["amount"],
+                                        "totalEarnings": plan["amount"]
+                                    },
+                                    "$set": {"updatedAt": get_ist_now()}
+                                },
+                                upsert=True
+                            )
+                        
+                        # 2. PV Distribution Logic
+                        pv_amount = plan.get("pv", 0)
+                        if pv_amount > 0:
+                            distribute_pv_upward(user_id, pv_amount)
+                        
+                 except Exception as e:
+                     print(f"Error during deferred plan activation: {e}")
         
         # Update KYC submission
         kyc_submissions_collection.update_one(
@@ -5220,11 +5305,11 @@ async def approve_kyc(
             {"$set": user_update_data}
         )
         
-        user = users_collection.find_one({"_id": ObjectId(user_id)})
-        
+
+
         return {
             "success": True,
-            "message": f"KYC approved for {user.get('name') if user else 'user'}. User is now active."
+            "message": f"KYC approved for {target_user.get('name') if target_user else 'user'}. User is now active."
         }
         
     except HTTPException as he:
@@ -5319,7 +5404,7 @@ async def get_weak_members_report(
         target_user_id = str(target_user["_id"])
         
         # Get all downline members recursively
-        def get_all_downline(parent_id, side=None, depth=0, max_depth=10):
+        def get_all_downline(parent_id, side=None, depth=0, max_depth=50):
             if depth > max_depth:
                 return []
             
@@ -5350,6 +5435,7 @@ async def get_weak_members_report(
         
         for member_data in all_downline:
             member = member_data["user"]
+            member_id = str(member["_id"])
             side = member_data["side"]
             
             weakness_reasons = []
@@ -5362,51 +5448,35 @@ async def get_weak_members_report(
                     "message": "No team members under this user",
                     "severity": "MEDIUM"
                 })
+            severity = "LOW" # Default to LOW, will be updated if higher severity weakness is found
+
+            # Check for binary legs
+            left_leg = teams_collection.find_one({"sponsorId": str(member["_id"]), "placement": "LEFT"})
+            right_leg = teams_collection.find_one({"sponsorId": str(member["_id"]), "placement": "RIGHT"})
             
-            # Check 2: Low PV
-            total_pv = member.get("totalPV", 0)
-            if total_pv == 0:
+            if not left_leg and not right_leg:
                 weakness_reasons.append({
-                    "type": "ZERO_PV",
-                    "message": "No Point Value accumulated",
-                    "severity": "HIGH"
-                })
-            elif total_pv < 100:
-                weakness_reasons.append({
-                    "type": "LOW_PV",
-                    "message": f"Low Point Value: {total_pv} PV",
-                    "severity": "MEDIUM"
-                })
-            
-            # Check 3: No plan activated
-            if not member.get("currentPlan") and not member.get("currentPlanId"):
-                weakness_reasons.append({
-                    "type": "NO_PLAN",
-                    "message": "No plan purchased/activated",
-                    "severity": "HIGH"
-                })
-            
-            # Check 4: Inactive status
-            if not member.get("isActive", False):
-                weakness_reasons.append({
-                    "type": "INACTIVE",
-                    "message": "Account is inactive",
+                    "type": "MISSING_BOTH",
+                    "message": "No Team (Missing Left & Right)",
                     "severity": "CRITICAL"
                 })
+                severity = "CRITICAL"
+            elif not left_leg:
+                weakness_reasons.append({
+                    "type": "MISSING_LEFT",
+                    "message": "Missing Left Team",
+                    "severity": "HIGH"
+                })
+                severity = "HIGH"
+            elif not right_leg:
+                weakness_reasons.append({
+                    "type": "MISSING_RIGHT",
+                    "message": "Missing Right Team",
+                    "severity": "HIGH"
+                })
+                severity = "HIGH"
             
-            # Check 5: Unbalanced legs
-            left_pv = member.get("leftPV", 0)
-            right_pv = member.get("rightPV", 0)
-            if left_pv > 0 or right_pv > 0:
-                if left_pv == 0 or right_pv == 0:
-                    empty_side = "LEFT" if left_pv == 0 else "RIGHT"
-                    weakness_reasons.append({
-                        "type": "UNBALANCED_LEGS",
-                        "message": f"No members on {empty_side} side",
-                        "severity": "MEDIUM"
-                    })
-            
-            # If member has any weakness, add to report
+            # Only add if there is a weakness
             if weakness_reasons:
                 # Get plan name
                 plan_name = None
@@ -5417,32 +5487,59 @@ async def get_weak_members_report(
                             plan_name = plan.get("name")
                     except:
                         plan_name = member.get("currentPlan") if len(str(member.get("currentPlan", ""))) < 50 else None
-                
+
                 weak_members.append({
-                    "id": str(member["_id"]),
+                    "id": member_id,
                     "name": member.get("name"),
                     "referralId": member.get("referralId"),
-                    "side": side,
-                    "totalPV": total_pv,
-                    "leftPV": left_pv,
-                    "rightPV": right_pv,
+                    "side": member_data["side"],  # Side relative to the target user
+                    "totalPV": member.get("totalPV", 0),
+                    "leftPV": member.get("leftPV", 0),
+                    "rightPV": member.get("rightPV", 0),
                     "currentPlan": plan_name,
                     "isActive": member.get("isActive", False),
                     "profilePhoto": member.get("profilePhoto"),
-                    "joinedAt": member.get("createdAt"),
+                    "joinedAt": member.get("createdAt").isoformat() if member.get("createdAt") else None,
                     "weaknessReasons": weakness_reasons,
-                    "overallSeverity": "CRITICAL" if any(r["severity"] == "CRITICAL" for r in weakness_reasons) else 
-                                       "HIGH" if any(r["severity"] == "HIGH" for r in weakness_reasons) else "MEDIUM"
+                    "overallSeverity": severity
                 })
+                
+
         
         # Sort by severity (CRITICAL first, then HIGH, then MEDIUM)
-        severity_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2}
-        weak_members.sort(key=lambda x: severity_order.get(x["overallSeverity"], 3))
+        severity_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
+        weak_members.sort(key=lambda x: severity_order.get(x["overallSeverity"], 4))
         
         # Group by side
         left_weak = [m for m in weak_members if m["side"] == "LEFT"]
         right_weak = [m for m in weak_members if m["side"] == "RIGHT"]
         
+        # Analyze target user weakness (The "Hero" status)
+        target_weakness = None
+        
+        # Check target user's legs
+        target_left = teams_collection.find_one({"sponsorId": target_user_id, "placement": "LEFT"})
+        target_right = teams_collection.find_one({"sponsorId": target_user_id, "placement": "RIGHT"})
+        
+        if not target_left and not target_right:
+            target_weakness = {
+                "type": "MISSING_BOTH",
+                "message": "No Team (Missing Left & Right)",
+                "severity": "CRITICAL"
+            }
+        elif not target_left:
+            target_weakness = {
+                "type": "MISSING_LEFT",
+                "message": "Missing Left Team",
+                "severity": "HIGH"
+            }
+        elif not target_right:
+            target_weakness = {
+                "type": "MISSING_RIGHT",
+                "message": "Missing Right Team",
+                "severity": "HIGH"
+            }
+
         return {
             "success": True,
             "data": {
@@ -5451,6 +5548,7 @@ async def get_weak_members_report(
                     "name": target_user.get("name"),
                     "referralId": target_user.get("referralId")
                 },
+                "targetUserWeakness": target_weakness,
                 "summary": {
                     "totalWeakMembers": len(weak_members),
                     "leftSideWeak": len(left_weak),
