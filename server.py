@@ -1196,7 +1196,7 @@ async def get_user_dashboard(current_user: dict = Depends(get_current_active_use
             todays_earnings = sum(t.get("amount", 0) for t in todays_transactions)
 
             # 2. Pending Withdrawals
-            pending_payouts = list(payout_requests_collection.find({
+            pending_payouts = list(withdrawals_collection.find({
                 "userId": user_id,
                 "status": "PENDING"
             }))
