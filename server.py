@@ -22,6 +22,8 @@ from reportlab.lib.pagesizes import letter, A4
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
+import requests
+
 
 # Auto-placement functions (moved from service to avoid import issues)
 
@@ -159,6 +161,8 @@ email_configs_collection = db["email_configs"]
 topups_collection = db["topups"]
 ranks_collection = db["ranks"]
 kyc_submissions_collection = db["kyc_submissions"]
+tutorials_collection = db["tutorials"]
+playlists_collection = db["playlists"]
 
 # JWT Configuration
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
@@ -718,6 +722,7 @@ async def startup_event():
     initialize_admin()
     
     print("✅ Database initialized successfully")
+    print("✅ Tutorial Routes Active")
 
 # ==================== AUTH ROUTES ====================
 
@@ -1426,7 +1431,8 @@ async def get_user_details(user_id: str, current_user: dict = Depends(get_curren
                 "right": right_count
             },
             "joinedAt": user.get("createdAt"),
-            "lastActive": user.get("updatedAt")
+            "lastActive": user.get("updatedAt"),
+            "kycData": user.get("kycData", {})  # Include KYC data in details
         }
         
         return {
@@ -2869,6 +2875,27 @@ async def update_user(
                     update_data["currentPlan"] = data["currentPlan"]
             else:
                 update_data["currentPlan"] = None
+        
+        # Update KYC related data if provided
+        kyc_updates = {}
+        if "kycData" in user:
+            kyc_updates = user["kycData"]
+        
+        # Helper to update nested kycData
+        fields_to_update = ["address", "dob", "nomineeName", "idNumber"]
+        for field in fields_to_update:
+            if field in data:
+                kyc_updates[field] = data[field]
+        
+        # Bank details
+        if "bank" in data:
+            if "bank" not in kyc_updates:
+                kyc_updates["bank"] = {}
+            for k, v in data["bank"].items():
+                kyc_updates["bank"][k] = v
+                
+        if kyc_updates:
+            update_data["kycData"] = kyc_updates
         
         if update_data:
             update_data["updatedAt"] = get_ist_now()
@@ -4791,6 +4818,7 @@ async def submit_kyc(
                 "address": data.get("address"),
                 "sponsorReferralId": current_user.get("sponsorId", ""),
                 "dob": data.get("dob"),
+                "nomineeName": data.get("nomineeName"),
                 "idNumber": data.get("idNumber"),
                 "bank": data.get("bank", {})
             },
@@ -5351,14 +5379,13 @@ async def reject_kyc(
                 "$set": {
                     "status": "REJECTED",
                     "remarks": remarks,
-                    "rejectedBy": current_admin["id"],
-                    "rejectedAt": get_ist_now(),
+                    "adminId": current_admin["id"],
                     "updatedAt": get_ist_now()
                 }
             }
         )
         
-        # Update user KYC status (user remains inactive)
+        # Update user's KYC status
         users_collection.update_one(
             {"_id": ObjectId(user_id)},
             {
@@ -5369,11 +5396,9 @@ async def reject_kyc(
             }
         )
         
-        user = users_collection.find_one({"_id": ObjectId(user_id)})
-        
         return {
             "success": True,
-            "message": f"KYC rejected for {user.get('name') if user else 'user'}. Reason: {remarks}"
+            "message": "KYC rejected successfully"
         }
         
     except HTTPException as he:
@@ -5381,6 +5406,259 @@ async def reject_kyc(
     except Exception as e:
         print(f"KYC reject error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+# ==================== TUTORIAL MANAGEMENT ROUTES ====================
+
+def fetch_youtube_oembed(video_url: str):
+    """Fetch YouTube video metadata using oEmbed"""
+    try:
+        oembed_url = f"https://www.youtube.com/oembed?url={video_url}&format=json"
+        response = requests.get(oembed_url)
+        if response.status_code == 200:
+            return response.json()
+        return None
+    except Exception as e:
+        print(f"Error fetching YouTube oEmbed: {e}")
+        return None
+
+# --- Preview Route (for fetching metadata before saving) ---
+
+@app.post("/api/admin/tutorials/preview")
+async def preview_youtube_video(
+    data: dict = Body(...),
+    current_admin: dict = Depends(get_current_admin)
+):
+    """Preview YouTube video metadata without saving"""
+    try:
+        url = data.get("url")
+        if not url:
+            raise HTTPException(status_code=400, detail="URL is required")
+        
+        metadata = fetch_youtube_oembed(url)
+        if not metadata:
+            raise HTTPException(status_code=400, detail="Could not fetch video metadata. Please check the URL.")
+        
+        return {
+            "success": True,
+            "data": {
+                "title": metadata.get("title"),
+                "thumbnail": metadata.get("thumbnail_url"),
+                "author": metadata.get("author_name")
+            }
+        }
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# --- Playlist Routes ---
+
+@app.post("/api/admin/tutorials/playlists")
+async def create_playlist(
+    data: dict = Body(...),
+    current_admin: dict = Depends(get_current_admin)
+):
+    """Create a new playlist"""
+    try:
+        name = data.get("name")
+        if not name:
+            raise HTTPException(status_code=400, detail="Playlist name is required")
+            
+        playlist = {
+            "name": name,
+            "description": data.get("description", ""),
+            "createdAt": get_ist_now(),
+            "updatedAt": get_ist_now()
+        }
+        
+        result = playlists_collection.insert_one(playlist)
+        
+        # Re-fetch to get proper serialization
+        created = playlists_collection.find_one({"_id": result.inserted_id})
+        
+        return {
+            "success": True,
+            "message": "Playlist created successfully",
+            "data": serialize_doc(created)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/admin/tutorials/playlists")
+async def get_playlists(current_admin: dict = Depends(get_current_admin)):
+    """List all playlists"""
+    try:
+        playlists = list(playlists_collection.find().sort("createdAt", -1))
+        # Count videos in each playlist
+        result_data = []
+        for pl in playlists:
+            video_count = tutorials_collection.count_documents({"playlistId": str(pl["_id"])})
+            pl_data = serialize_doc(pl)
+            pl_data["videoCount"] = video_count
+            result_data.append(pl_data)
+            
+        return {"success": True, "data": result_data}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/admin/tutorials/playlists/{playlist_id}")
+async def delete_playlist(
+    playlist_id: str,
+    current_admin: dict = Depends(get_current_admin)
+):
+    """Delete a playlist"""
+    try:
+        # Check if videos exist in this playlist
+        if tutorials_collection.count_documents({"playlistId": playlist_id}) > 0:
+            raise HTTPException(status_code=400, detail="Cannot delete playlist containing videos. Remove videos first.")
+            
+        result = playlists_collection.delete_one({"_id": ObjectId(playlist_id)})
+        if result.deleted_count == 0:
+            raise HTTPException(status_code=404, detail="Playlist not found")
+            
+        return {"success": True, "message": "Playlist deleted successfully"}
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# --- Video Routes ---
+
+@app.post("/api/admin/tutorials/videos")
+async def add_video(
+    data: dict = Body(...),
+    current_admin: dict = Depends(get_current_admin)
+):
+    """Add a new tutorial video"""
+    try:
+        url = data.get("url")
+        playlist_id = data.get("playlistId")
+        
+        if not url:
+            raise HTTPException(status_code=400, detail="Video URL is required")
+        
+        # Verify playlist
+        if playlist_id:
+            if not playlists_collection.find_one({"_id": ObjectId(playlist_id)}):
+                raise HTTPException(status_code=400, detail="Invalid playlist ID")
+        
+        # Auto-fetch metadata if not provided
+        title = data.get("title")
+        thumbnail = data.get("thumbnail")
+        
+        if not title or not thumbnail:
+            metadata = fetch_youtube_oembed(url)
+            if metadata:
+                if not title:
+                    title = metadata.get("title")
+                if not thumbnail:
+                    thumbnail = metadata.get("thumbnail_url")
+        
+        if not title:
+            title = "Untitled Video"
+            
+        video = {
+            "url": url,
+            "title": title,
+            "thumbnail": thumbnail,
+            "playlistId": playlist_id,
+            "description": data.get("description", ""),
+            "createdAt": get_ist_now(),
+            "updatedAt": get_ist_now()
+        }
+        
+        result = tutorials_collection.insert_one(video)
+        
+        # Re-fetch to get proper serialization
+        created = tutorials_collection.find_one({"_id": result.inserted_id})
+        
+        return {
+            "success": True,
+            "message": "Video added successfully",
+            "data": serialize_doc(created)
+        }
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/admin/tutorials/videos")
+async def get_admin_videos(current_admin: dict = Depends(get_current_admin)):
+    """List all videos for admin"""
+    try:
+        videos = list(tutorials_collection.find().sort("createdAt", -1))
+        
+        # Enrich with playlist names
+        result_data = []
+        for vid in videos:
+            vid_data = serialize_doc(vid)
+            if vid_data.get("playlistId"):
+                pl = playlists_collection.find_one({"_id": ObjectId(vid_data["playlistId"])})
+                if pl:
+                    vid_data["playlistName"] = pl.get("name")
+            result_data.append(vid_data)
+            
+        return {"success": True, "data": result_data}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/admin/tutorials/videos/{video_id}")
+async def delete_video(
+    video_id: str,
+    current_admin: dict = Depends(get_current_admin)
+):
+    """Delete a video"""
+    try:
+        result = tutorials_collection.delete_one({"_id": ObjectId(video_id)})
+        if result.deleted_count == 0:
+            raise HTTPException(status_code=404, detail="Video not found")
+            
+        return {"success": True, "message": "Video deleted successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# --- Public/User Routes ---
+
+@app.get("/api/tutorials")
+async def get_user_tutorials(current_user: dict = Depends(get_current_active_user)):
+    """Get all tutorials grouped by playlist"""
+    try:
+        # Get all playlists
+        playlists = list(playlists_collection.find().sort("createdAt", -1))
+        
+        # Get all videos
+        videos = list(tutorials_collection.find().sort("createdAt", -1))
+        
+        # Group videos by playlist
+        grouped_data = []
+        
+        # 1. Add specific playlists
+        for pl in playlists:
+            pl_id = str(pl["_id"])
+            pl_videos = [serialize_doc(v) for v in videos if str(v.get("playlistId", "")) == pl_id]
+            
+            if pl_videos:
+                grouped_data.append({
+                    "id": pl_id,
+                    "name": pl["name"],
+                    "description": pl.get("description", ""),
+                    "videos": pl_videos
+                })
+        
+        # 2. Add uncategorized videos
+        uncategorized = [serialize_doc(v) for v in videos if not v.get("playlistId")]
+        if uncategorized:
+            grouped_data.append({
+                "id": "uncategorized",
+                "name": "Other Videos",
+                "description": "General tutorials",
+                "videos": uncategorized
+            })
+            
+        return {"success": True, "data": grouped_data}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 
 # ==================== WEAK MEMBER REPORT ====================
