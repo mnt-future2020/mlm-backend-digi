@@ -76,3 +76,4 @@ uvicorn==0.32.1
 # uvloop not supported on Windows
 watchfiles==1.1.1
 websockets==15.0.1
+apscheduler

@@ -23,6 +23,11 @@ from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, 
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
 import requests
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+import requests
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
+import traceback
 
 
 # Auto-placement functions (moved from service to avoid import issues)
@@ -149,6 +154,32 @@ MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "mlm_vsv_unite")
 client = MongoClient(MONGO_URL)
 db = client[MONGO_DB_NAME]
 
+# Initialize Scheduler
+scheduler = AsyncIOScheduler()
+
+@app.on_event("startup")
+async def start_scheduler():
+    """Start the scheduler on app startup"""
+    try:
+        # Schedule EOD Job at 12:01 AM IST
+        scheduler.add_job(
+            process_eod_matching_for_all_users,
+            CronTrigger(hour=0, minute=1, timezone=IST),
+            id="eod_matching_job",
+            replace_existing=True
+        )
+        scheduler.start()
+        print(f"✅ Scheduler started. EOD Job scheduled for 00:01 IST. Current Time (IST): {get_ist_now()}")
+    except Exception as e:
+        print(f"❌ Failed to start scheduler: {e}")
+
+@app.on_event("shutdown")
+async def stop_scheduler():
+    """Stop the scheduler on app shutdown"""
+    if scheduler.running:
+        scheduler.shutdown()
+        print("🛑 Scheduler shut down")
+
 # Collections
 users_collection = db["users"]
 plans_collection = db["plans"]
@@ -227,36 +258,60 @@ def generate_referral_id(prefix="VSV"):
 
 def get_user_rank(total_pv: int):
     """Get user rank based on total PV"""
-    # Get all ranks sorted by minPV descending
-    ranks = list(ranks_collection.find({}).sort("minPV", DESCENDING))
-    
-    # Find the highest rank user qualifies for
-    for rank in ranks:
-        if total_pv >= rank.get("minPV", 0):
-            return {
-                "name": rank.get("name"),
-                "icon": rank.get("icon"),
-                "color": rank.get("color"),
-                "minPV": rank.get("minPV")
+    try:
+        # 1. Safely cast input PV
+        try:
+            user_pv = int(float(total_pv))
+        except (ValueError, TypeError):
+            user_pv = 0
+
+        # 2. Get all ranks
+        ranks = list(ranks_collection.find({}).sort("minPV", DESCENDING))
+        
+        # 3. Find the highest rank user qualifies for
+        for rank in ranks:
+            # Safely cast rank minPV
+            try:
+                min_pv = int(float(rank.get("minPV", 0)))
+            except (ValueError, TypeError):
+                min_pv = 0
+                
+            if user_pv >= min_pv:
+                return {
+                    "name": rank.get("name"),
+                    "icon": rank.get("icon"),
+                    "color": rank.get("color"),
+                    "minPV": min_pv
+                }
+        
+        # 4. If no rank found, return lowest rank or default
+        lowest_rank = ranks_collection.find_one({}, sort=[("minPV", ASCENDING)])
+        if lowest_rank:
+             try:
+                min_pv = int(float(lowest_rank.get("minPV", 0)))
+             except: min_pv = 0
+             return {
+                "name": lowest_rank.get("name"),
+                "icon": lowest_rank.get("icon"),
+                "color": lowest_rank.get("color"),
+                "minPV": min_pv
             }
-    
-    # If no rank found, return lowest rank
-    lowest_rank = ranks_collection.find_one({}, sort=[("minPV", ASCENDING)])
-    if lowest_rank:
+        
+        # Default fallback
         return {
-            "name": lowest_rank.get("name"),
-            "icon": lowest_rank.get("icon"),
-            "color": lowest_rank.get("color"),
-            "minPV": lowest_rank.get("minPV")
+            "name": "Member",
+            "icon": "👤",
+            "color": "#6B7280",
+            "minPV": 0
         }
-    
-    # Default rank if no ranks defined
-    return {
-        "name": "Member",
-        "icon": "👤",
-        "color": "#6B7280",
-        "minPV": 0
-    }
+    except Exception as e:
+        print(f"Error in get_user_rank: {e}")
+        return {
+            "name": "Member",
+            "icon": "👤",
+            "color": "#6B7280",
+            "minPV": 0
+        }
 
 def serialize_doc(doc):
     """Convert MongoDB document to JSON serializable format"""
@@ -461,6 +516,7 @@ class UserRegister(BaseModel):
     email: Optional[str] = None  # Changed from EmailStr to str to allow empty
     password: str
     mobile: str
+    gender: Optional[str] = "Male"
     referralId: Optional[str] = None
     placement: Optional[str] = None  # LEFT or RIGHT
     planId: Optional[str] = None  # Optional plan assignment during registration
@@ -777,6 +833,7 @@ async def register(user: UserRegister):
             "username": user.username,
             "password": hash_password(user.password),
             "mobile": user.mobile,
+            "gender": user.gender,
             "referralId": referral_id,
             "role": "user",
             "isActive": False,  # User is inactive until KYC is approved
@@ -1041,6 +1098,30 @@ async def get_profile(current_user: dict = Depends(get_current_active_user)):
         })
         user_data["leftTeamSize"] = left_count
         user_data["rightTeamSize"] = right_count
+        
+        # Get Sponsor Name
+        if "sponsorId" in user_data and user_data["sponsorId"]:
+            sponsor = users_collection.find_one({"referralId": user_data["sponsorId"]})
+            if sponsor:
+                user_data["sponsorName"] = sponsor.get("name", "Unknown")
+        
+        # Get KYC details if available
+        kyc_submission = kyc_submissions_collection.find_one({
+            "userId": current_user["id"],
+            "status": "APPROVED"
+        })
+        
+        if kyc_submission and "form" in kyc_submission:
+            form = kyc_submission["form"]
+            user_data["bank"] = form.get("bank", {})
+            user_data["nomineeName"] = form.get("nomineeName")
+            user_data["dob"] = form.get("dob")
+            user_data["panCardBase64"] = kyc_submission.get("panCardBase64") # Should we send base64? User said NO images.
+            # User request: "proof image kaata venam" (don't show proof images)
+            # So I will NOT include base64 images here to keep payload light and follow instructions.
+            
+            # Just send text details that might be in the form
+            user_data["address"] = form.get("address")
         
         return {"success": True, "data": user_data}
     except Exception as e:
@@ -1451,8 +1532,27 @@ async def get_team_list(current_user: dict = Depends(get_current_active_user)):
     try:
         user_id = current_user["id"]
         
-        # Get all team members
-        team_members = list(teams_collection.find({"sponsorId": user_id}))
+        # BFS to get all team members (Binary Downline)
+        team_members = []
+        current_level_parents = [user_id]
+        
+        # Safety limit for depth
+        max_depth = 100
+        current_depth = 0
+        
+        while current_level_parents and current_depth < max_depth:
+            # Find children where sponsorId (Upline) is in current_level_parents
+            # Note: In teams_collection, 'sponsorId' is the Upline/Parent ID
+            level_members = list(teams_collection.find({"sponsorId": {"$in": current_level_parents}}))
+            
+            if not level_members:
+                break
+                
+            team_members.extend(level_members)
+            
+            # Prepare next level
+            current_level_parents = [m["userId"] for m in level_members]
+            current_depth += 1
         
         if not team_members:
             return {"success": True, "data": []}
@@ -1823,14 +1923,16 @@ async def create_topup_request(
     """Create a topup/plan upgrade request"""
     try:
         plan_id = data.get("planId")
-        payment_method = data.get("paymentMethod", "Bank Transfer")
-        transaction_details = data.get("transactionDetails", "")
+        # Defaults for simplified flow
+        payment_method = data.get("paymentMethod", "Direct Request")
+        transaction_details = data.get("transactionDetails", "User requested upgrade")
         
         if not plan_id:
             raise HTTPException(status_code=400, detail="Plan ID required")
-        
-        if not transaction_details:
-            raise HTTPException(status_code=400, detail="Transaction details required")
+            
+        # Removed mandatory transaction details check
+        # if not transaction_details:
+        #     raise HTTPException(status_code=400, detail="Transaction details required")
         
         # Get plan details
         plan = plans_collection.find_one({"_id": ObjectId(plan_id)})
@@ -2034,8 +2136,8 @@ def process_eod_matching_for_all_users():
     """
     try:
         # Get all active users with a plan
+        # Get all users with a plan (both active and inactive earn income)
         active_users = list(users_collection.find({
-            "isActive": True,
             "currentPlan": {"$ne": None}
         }))
         
@@ -2080,6 +2182,20 @@ def process_eod_matching_for_all_users():
         print(f"Error in EOD matching process: {str(e)}")
         return {"error": str(e)}
 
+@app.post("/api/admin/trigger-eod")
+async def trigger_eod_manual(current_admin: dict = Depends(get_current_admin)):
+    """Manually trigger the EOD matching process (Admin only)"""
+    try:
+        print(f"⚠️ User {current_admin['username']} manually triggered EOD process at {get_ist_now()}")
+        result = process_eod_matching_for_all_users()
+        return {
+            "success": True,
+            "message": "EOD process completed successfully",
+            "details": result
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 def process_carry_forward():
     """
@@ -2088,8 +2204,8 @@ def process_carry_forward():
     """
     try:
         # Get all active users
+        # Get all users with a plan
         active_users = list(users_collection.find({
-            "isActive": True,
             "currentPlan": {"$ne": None}
         }))
         
@@ -4780,29 +4896,30 @@ async def submit_kyc(
                 raise HTTPException(status_code=400, detail="KYC already approved")
             raise HTTPException(status_code=400, detail="KYC already submitted and pending review")
         
-        # Validate required fields
-        required_fields = ["name", "email", "phone", "address", "dob", "idNumber", "idProofBase64"]
+        # Validate required fields - Removed idNumber, added specific proofs
+        required_fields = ["name", "email", "phone", "address", "dob", "panCardBase64", "aadharCardBase64", "bankPassbookBase64"]
         for field in required_fields:
             if not data.get(field):
                 raise HTTPException(status_code=400, detail=f"{field} is required")
         
-        # Validate ID proof (JPEG only, max 500KB)
-        id_proof = data.get("idProofBase64", "")
-        if not is_valid_jpeg(id_proof):
-            raise HTTPException(status_code=400, detail="ID proof must be a valid JPEG image")
-        
-        size_kb = get_base64_size_kb(id_proof)
-        if size_kb > 500:
-            raise HTTPException(status_code=400, detail=f"ID proof must be under 500KB. Current size: {size_kb:.1f}KB")
+        # Helper to validate image
+        def validate_image(base64_str, field_name):
+            if not is_valid_jpeg(base64_str):
+                raise HTTPException(status_code=400, detail=f"{field_name} must be a valid JPEG image")
+            size_kb = get_base64_size_kb(base64_str)
+            if size_kb > 500:
+                raise HTTPException(status_code=400, detail=f"{field_name} must be under 500KB. Current size: {size_kb:.1f}KB")
+            return base64_str
+
+        # Validate all documents
+        pan_card = validate_image(data.get("panCardBase64", ""), "PAN Card")
+        aadhar_card = validate_image(data.get("aadharCardBase64", ""), "Aadhar Card")
+        bank_passbook = validate_image(data.get("bankPassbookBase64", ""), "Bank Passbook")
         
         # Validate profile photo if provided (JPEG only, max 500KB)
         profile_photo = data.get("profilePhotoBase64", "")
         if profile_photo:
-            if not is_valid_jpeg(profile_photo):
-                raise HTTPException(status_code=400, detail="Profile photo must be a valid JPEG image")
-            photo_size_kb = get_base64_size_kb(profile_photo)
-            if photo_size_kb > 500:
-                raise HTTPException(status_code=400, detail=f"Profile photo must be under 500KB. Current size: {photo_size_kb:.1f}KB")
+            validate_image(profile_photo, "Profile Photo")
         
         # Create KYC submission
         kyc_data = {
@@ -4819,10 +4936,11 @@ async def submit_kyc(
                 "sponsorReferralId": current_user.get("sponsorId", ""),
                 "dob": data.get("dob"),
                 "nomineeName": data.get("nomineeName"),
-                "idNumber": data.get("idNumber"),
                 "bank": data.get("bank", {})
             },
-            "idProofBase64": id_proof,
+            "panCardBase64": pan_card,
+            "aadharCardBase64": aadhar_card,
+            "bankPassbookBase64": bank_passbook,
             "profilePhotoBase64": profile_photo,
             "status": "SUBMITTED",
             "remarks": None,
@@ -5891,6 +6009,262 @@ async def admin_update_user_profile(
         
     except HTTPException as he:
         raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+
+# ==================== TREE VIEW ROUTES ====================
+
+@app.get("/api/team/tree")
+async def get_user_team_tree(
+    current_user: dict = Depends(get_current_user)
+):
+    """Get current user's binary tree root with enriched data"""
+    try:
+        user_id = current_user.get("id")
+        if not user_id and "_id" in current_user:
+            user_id = str(current_user["_id"])
+            
+        if not user_id:
+            raise HTTPException(status_code=400, detail="User ID not found")
+            
+        # Check if user has any children
+        left_child = teams_collection.find_one({"sponsorId": user_id, "placement": "LEFT"})
+        right_child = teams_collection.find_one({"sponsorId": user_id, "placement": "RIGHT"})
+        has_children = bool(left_child or right_child)
+        
+        # Get package details and capping
+        package_name = None
+        package_amount = 0
+        daily_capping = 0
+        
+        if current_user.get("currentPlan"):
+             if isinstance(current_user["currentPlan"], dict):
+                 package_name = current_user["currentPlan"].get("name")
+                 package_amount = current_user["currentPlan"].get("amount", 0)
+                 # Try to get full plan details for capping
+                 try:
+                     plan_details = plans_collection.find_one({"name": package_name})
+                     if plan_details:
+                         daily_capping = plan_details.get("dailyCapping", 0)
+                 except: pass
+                 
+             elif isinstance(current_user["currentPlan"], str):
+                 package_name = current_user["currentPlan"]
+                 # Try to fetch amount and capping if string
+                 try: 
+                    p = plans_collection.find_one({"name": package_name})
+                    if p: 
+                        package_amount = p.get("amount", 0)
+                        daily_capping = p.get("dailyCapping", 0)
+                 except: pass
+
+        # Get Wallet Details
+        wallet = wallets_collection.find_one({"userId": user_id})
+        wallet_balance = wallet.get("balance", 0) if wallet else 0
+        total_earnings = wallet.get("totalEarnings", 0) if wallet else 0
+
+        # Calculate Rank
+        # Calculate Rank
+        raw_pv = current_user.get("totalPV", 0)
+        try:
+            total_pv = int(float(raw_pv))
+        except (ValueError, TypeError):
+            total_pv = 0
+            
+        rank_info = get_user_rank(total_pv) or {"name": "Member", "icon": "👤", "color": "#6B7280"}
+        
+        # Daily PV stats
+        daily_pv_used = current_user.get("dailyPVUsed", 0)
+        last_matching = current_user.get("lastMatchingDate")
+        
+        # Reset daily stats if day changed (just for display, actual reset happens in calculation)
+        try:
+            today = datetime.now(IST).replace(hour=0, minute=0, second=0, microsecond=0)
+            if last_matching:
+                if isinstance(last_matching, str):
+                    # Should be datetime, but handle legacy string data safely
+                    daily_pv_used = 0
+                else:
+                    # Handle timezone naive/aware safely
+                    lm = last_matching
+                    if lm.tzinfo is None:
+                        lm = lm.replace(tzinfo=IST)
+                    else:
+                        lm = lm.astimezone(IST)
+                    
+                    if lm.replace(hour=0, minute=0, second=0, microsecond=0) != today:
+                        daily_pv_used = 0
+        except Exception as e:
+            print(f"Error checking daily stats reset: {e}")
+            daily_pv_used = 0
+
+        # Direct Referrals Count
+        direct_referrals = users_collection.count_documents({"sponsorId": current_user.get("referralId")})
+
+        root_node = {
+            "_id": user_id,
+            "id": user_id,
+            "name": current_user["name"],
+            "referralId": current_user.get("referralId"),
+            "package": package_name,
+            "packageAmount": package_amount,
+            "position": "root",
+            "hasChildren": has_children,
+            "isActive": current_user.get("isActive", False),
+            "leftPV": current_user.get("leftPV", 0),
+            "rightPV": current_user.get("rightPV", 0),
+            "totalPV": total_pv,
+            "rank": rank_info.get("name"),
+            "joinDate": current_user.get("createdAt").isoformat() if isinstance(current_user.get("createdAt"), datetime) else str(current_user.get("createdAt")),
+            "dailyPVUsed": daily_pv_used,
+            "dailyCapping": daily_capping,
+            "walletBalance": wallet_balance,
+            "totalEarnings": total_earnings,
+            "directReferrals": direct_referrals,
+            "children": [],
+            "isLoading": False
+        }
+        
+        return {
+            "success": True,
+            "data": root_node
+        }
+
+    except Exception as e:
+        print(f"Error in get_user_team_tree: {str(e)}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/team/node/{node_id}/children")
+async def get_node_children(
+    node_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get children of a specific node with enriched data"""
+    try:
+        # Validate node exists
+        try:
+            parent = users_collection.find_one({"_id": ObjectId(node_id)})
+        except:
+            parent = users_collection.find_one({"referralId": node_id})
+            
+        if not parent:
+            raise HTTPException(status_code=404, detail="Node not found")
+            
+        node_id_str = str(parent["_id"])
+            
+        # Helper to format node
+        def format_node(user_doc, position):
+             # Check if this node has children
+            u_id = str(user_doc["_id"])
+            l = teams_collection.find_one({"sponsorId": u_id, "placement": "LEFT"})
+            r = teams_collection.find_one({"sponsorId": u_id, "placement": "RIGHT"})
+            has_kids = bool(l or r)
+            
+            p_name = None
+            p_amount = 0
+            d_capping = 0
+            
+            if user_doc.get("currentPlan"):
+                 if isinstance(user_doc["currentPlan"], dict):
+                     p_name = user_doc["currentPlan"].get("name")
+                     p_amount = user_doc["currentPlan"].get("amount", 0)
+                     # Try to get full plan details
+                     try:
+                         pd = plans_collection.find_one({"name": p_name})
+                         if pd: d_capping = pd.get("dailyCapping", 0)
+                     except: pass
+                 elif isinstance(user_doc["currentPlan"], str):
+                     p_name = user_doc["currentPlan"]
+                     try: 
+                        p = plans_collection.find_one({"name": p_name})
+                        if p: 
+                            p_amount = p.get("amount", 0)
+                            d_capping = p.get("dailyCapping", 0)
+                     except: pass
+            
+            # Get Wallet Details
+            w = wallets_collection.find_one({"userId": u_id})
+            w_balance = w.get("balance", 0) if w else 0
+            w_total = w.get("totalEarnings", 0) if w else 0
+
+            # Calculate Rank
+            t_pv = user_doc.get("totalPV", 0)
+            r_info = get_user_rank(t_pv)
+            
+             # Daily PV stats
+            d_pv_used = user_doc.get("dailyPVUsed", 0)
+            l_matching = user_doc.get("lastMatchingDate")
+            
+            try:
+                today = datetime.now(IST).replace(hour=0, minute=0, second=0, microsecond=0)
+                if l_matching:
+                    if isinstance(l_matching, str):
+                        d_pv_used = 0
+                    else:
+                        lm = l_matching
+                        if lm.tzinfo is None:
+                            lm = lm.replace(tzinfo=IST)
+                        else:
+                            lm = lm.astimezone(IST)
+                        
+                        if lm.replace(hour=0, minute=0, second=0, microsecond=0) != today:
+                            d_pv_used = 0
+            except:
+                d_pv_used = 0
+
+            # Direct Referrals Count
+            d_referrals = users_collection.count_documents({"sponsorId": user_doc.get("referralId")})
+
+            return {
+                "_id": u_id,
+                "id": u_id,
+                "referralId": user_doc.get("referralId"),
+                "name": user_doc["name"],
+                "package": p_name,
+                "packageAmount": p_amount,
+                "position": position,
+                "hasChildren": has_kids,
+                "isActive": user_doc.get("isActive", False),
+                "leftPV": user_doc.get("leftPV", 0),
+                "rightPV": user_doc.get("rightPV", 0),
+                "totalPV": t_pv,
+                "rank": r_info.get("name"),
+                "joinDate": user_doc.get("createdAt"),
+                "dailyPVUsed": d_pv_used,
+                "dailyCapping": d_capping,
+                "walletBalance": w_balance,
+                "totalEarnings": w_total,
+                "directReferrals": d_referrals,
+                "children": []
+            }
+
+        # Find children in teams collection
+        left_link = teams_collection.find_one({"sponsorId": node_id_str, "placement": "LEFT"})
+        right_link = teams_collection.find_one({"sponsorId": node_id_str, "placement": "RIGHT"})
+        
+        left_node = None
+        if left_link:
+            l_user = users_collection.find_one({"_id": ObjectId(left_link["userId"])})
+            if l_user:
+                left_node = format_node(l_user, "left")
+
+        right_node = None
+        if right_link:
+            r_user = users_collection.find_one({"_id": ObjectId(right_link["userId"])})
+            if r_user:
+                right_node = format_node(r_user, "right")
+
+        return {
+            "success": True,
+            "data": {
+                "left": left_node,
+                "right": right_node
+            }
+        }
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
