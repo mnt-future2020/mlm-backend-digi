@@ -1932,9 +1932,9 @@ async def activate_plan(
 @app.post("/api/topup/request")
 async def create_topup_request(
     data: dict = Body(...),
-    current_user: dict = Depends(get_current_active_user)
+    current_user: dict = Depends(get_current_user)
 ):
-    """Create a topup/plan upgrade request"""
+    """Create a topup/plan upgrade request (allows inactive users)"""
     try:
         plan_id = data.get("planId")
         # Defaults for simplified flow
