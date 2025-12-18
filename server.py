@@ -263,9 +263,9 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     return encoded_jwt
 
 def generate_referral_id(prefix="VSV"):
-    """Generate unique referral ID"""
+    """Generate unique referral ID with numbers only"""
     while True:
-        random_str = ''.join(random.choices(string.ascii_uppercase + string.digits, k=7))
+        random_str = ''.join(random.choices(string.digits, k=7))
         referral_id = f"{prefix}{random_str}"
         if not users_collection.find_one({"referralId": referral_id}):
             return referral_id
