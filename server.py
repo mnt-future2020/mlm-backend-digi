@@ -2570,7 +2570,31 @@ async def save_ranks(data: dict = Body(...)):
                 rank.pop("_id", None)
             ranks_collection.insert_many(ranks_data)
         
-        return {"success": True, "message": "Ranks updated successfully"}
+        # Return updated ranks
+        ranks = list(ranks_collection.find({}).sort("order", ASCENDING))
+        return {"success": True, "message": "Ranks updated successfully", "data": serialize_doc(ranks)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/api/settings/ranks")
+async def update_ranks(data: dict = Body(...)):
+    """Update ranks (PUT method)"""
+    try:
+        ranks_data = data.get("ranks", [])
+        
+        # Clear existing ranks
+        ranks_collection.delete_many({})
+        
+        # Insert new ranks
+        if ranks_data:
+            # Remove _id from new ranks if present
+            for rank in ranks_data:
+                rank.pop("_id", None)
+            ranks_collection.insert_many(ranks_data)
+        
+        # Return updated ranks
+        ranks = list(ranks_collection.find({}).sort("order", ASCENDING))
+        return {"success": True, "message": "Ranks updated successfully", "data": serialize_doc(ranks)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -2581,7 +2605,10 @@ async def delete_rank(rank_id: str):
         result = ranks_collection.delete_one({"_id": ObjectId(rank_id)})
         if result.deleted_count == 0:
             raise HTTPException(status_code=404, detail="Rank not found")
-        return {"success": True, "message": "Rank deleted successfully"}
+        
+        # Return updated ranks list
+        ranks = list(ranks_collection.find({}).sort("order", ASCENDING))
+        return {"success": True, "message": "Rank deleted successfully", "data": serialize_doc(ranks)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
