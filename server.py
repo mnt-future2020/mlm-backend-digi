@@ -99,6 +99,52 @@ def get_auto_placement_position(sponsor_id: str, preferred_placement: str):
     else:
         return sponsor_id, "LEFT"
 
+def distribute_pv_upward(user_id: str, pv_amount: int):
+    """
+    Distribute PV upward in the binary tree
+    PV flows from child to all ancestors based on placement
+    """
+    try:
+        current_user_id = user_id
+        
+        # Traverse up the tree
+        for _ in range(100):  # Max 100 levels
+            # Get current user's team record
+            team_record = teams_collection.find_one({"userId": current_user_id})
+            
+            if not team_record or not team_record.get("sponsorId"):
+                break
+            
+            sponsor_id = team_record["sponsorId"]
+            placement = team_record.get("placement")
+            
+            # Determine which side to add PV (LEFT or RIGHT)
+            if placement == "LEFT":
+                update_field = "leftPV"
+            elif placement == "RIGHT":
+                update_field = "rightPV"
+            else:
+                break
+            
+            # Update sponsor's PV
+            users_collection.update_one(
+                {"_id": ObjectId(sponsor_id)},
+                {
+                    "$inc": {update_field: pv_amount},
+                    "$set": {"updatedAt": get_ist_now()}
+                }
+            )
+            
+            # Move up to next sponsor
+            sponsor_team = teams_collection.find_one({"userId": sponsor_id})
+            if not sponsor_team or not sponsor_team.get("sponsorId"):
+                break
+            
+            current_user_id = sponsor_id
+    
+    except Exception as e:
+        print(f"Error in PV distribution: {str(e)}")
+
 def get_placement_info_for_display(sponsor_id: str, preferred_placement: str):
     """Get human-readable placement information for UI display"""
     original_sponsor = users_collection.find_one({"_id": ObjectId(sponsor_id)})
@@ -893,11 +939,12 @@ async def register(user: UserRegister):
                 "createdAt": get_ist_now()
             })
             
-            # Distribute PV if plan is assigned (referral income system removed)
-            # LOGIC DEFERRED TO KYC APPROVAL:
-            # Plan activation and PV distribution will only happen when KYC is approved
-            # and user becomes ACTIVE.
-            pass
+            # Distribute PV upward if user has a plan
+            if plan:
+                pv_amount = plan.get("pv", 0)
+                if pv_amount > 0:
+                    # Distribute PV to all ancestors based on placement
+                    distribute_pv_upward(user_id, pv_amount)
 
         
         # Create access token
@@ -1439,11 +1486,16 @@ async def get_user_details(user_id: str, current_user: dict = Depends(get_curren
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
         
-        # Get plan details
+        # Get plan details - use currentPlanId first, fallback to currentPlan
         plan_details = None
-        if user.get("currentPlan"):
+        plan_id = user.get("currentPlanId") or user.get("currentPlan")
+        if plan_id:
             try:
-                plan = plans_collection.find_one({"_id": ObjectId(user["currentPlan"])})
+                plan = None
+                if ObjectId.is_valid(plan_id):
+                    plan = plans_collection.find_one({"_id": ObjectId(plan_id)})
+                if not plan:
+                    plan = plans_collection.find_one({"name": plan_id})
                 if plan:
                     plan_details = {
                         "name": plan.get("name"),
@@ -1851,7 +1903,8 @@ async def activate_plan(
             {"_id": ObjectId(user_id)},
             {
                 "$set": {
-                    "currentPlan": str(plan["_id"]),
+                    "currentPlan": plan["name"],
+                    "currentPlanId": str(plan["_id"]),
                     "currentPlanName": plan["name"],
                     "dailyPVLimit": plan.get("dailyCapping", 500) // 25,  # Daily PV limit
                     "updatedAt": get_ist_now()
@@ -2055,8 +2108,16 @@ def calculate_matching_income(user_id: str):
         if left_pv == 0 or right_pv == 0:
             return
         
-        # Get plan details
-        plan = plans_collection.find_one({"_id": ObjectId(user["currentPlan"])})
+        # Get plan details - use currentPlanId first, fallback to currentPlan
+        plan_id = user.get("currentPlanId") or user.get("currentPlan")
+        plan = None
+        if plan_id:
+            # Try as ObjectId first
+            if ObjectId.is_valid(plan_id):
+                plan = plans_collection.find_one({"_id": ObjectId(plan_id)})
+            # Fallback: try by name
+            if not plan:
+                plan = plans_collection.find_one({"name": plan_id})
         if not plan:
             return
         
@@ -3021,17 +3082,39 @@ async def update_user(
             update_data["email"] = data["email"]
         if data.get("mobile"):
             update_data["mobile"] = data["mobile"]
+        
+        # Track if we need to distribute PV (new plan assignment or upgrade)
+        pv_to_distribute = 0
+        new_plan = None
+        old_plan_id = user.get("currentPlanId") or user.get("currentPlan")
+        
         if "currentPlan" in data:
             # Handle plan assignment/change
             if data["currentPlan"]:
                 # Find plan by name
                 plan = plans_collection.find_one({"name": data["currentPlan"]})
                 if plan:
-                    update_data["currentPlan"] = str(plan["_id"])
+                    new_plan_id = str(plan["_id"])
+                    update_data["currentPlan"] = plan["name"]
+                    update_data["currentPlanId"] = new_plan_id
+                    new_plan = plan
+                    new_pv = plan.get("pv", 0)
+                    
+                    # Calculate PV to distribute
+                    if not old_plan_id:
+                        # New plan assignment - distribute full PV
+                        pv_to_distribute = new_pv
+                    else:
+                        # Plan change - distribute difference if upgrading
+                        old_plan = plans_collection.find_one({"_id": ObjectId(old_plan_id)}) if ObjectId.is_valid(old_plan_id) else plans_collection.find_one({"name": old_plan_id})
+                        old_pv = old_plan.get("pv", 0) if old_plan else 0
+                        if new_pv > old_pv:
+                            pv_to_distribute = new_pv - old_pv
                 else:
                     update_data["currentPlan"] = data["currentPlan"]
             else:
                 update_data["currentPlan"] = None
+                update_data["currentPlanId"] = None
         
         # Update KYC related data if provided
         kyc_updates = {}
@@ -3060,6 +3143,11 @@ async def update_user(
                 {"_id": ObjectId(user_id)},
                 {"$set": update_data}
             )
+        
+        # Distribute PV to sponsors if new plan was assigned or upgraded
+        if pv_to_distribute > 0:
+            distribute_pv_upward(user_id, pv_to_distribute)
+            print(f"PV distributed: {pv_to_distribute} PV for user {user_id} with plan {new_plan.get('name')}")
         
         return {
             "success": True,
@@ -3465,7 +3553,8 @@ async def approve_topup(
             {"_id": ObjectId(user_id)},
             {
                 "$set": {
-                    "currentPlan": str(plan["_id"]),
+                    "currentPlan": plan["name"],
+                    "currentPlanId": str(plan["_id"]),
                     "currentPlanName": plan["name"],
                     "dailyPVLimit": plan.get("dailyCapping", 500) // 25,
                     "updatedAt": get_ist_now()
