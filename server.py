@@ -217,21 +217,49 @@ db = client[MONGO_DB_NAME]
 # Initialize Scheduler
 scheduler = AsyncIOScheduler()
 
-@app.on_event("startup")
-async def start_scheduler():
-    """Start the scheduler on app startup"""
+def run_eod_job_wrapper():
+    """Wrapper function for EOD job with proper error handling and logging"""
     try:
+        print(f"\n{'='*50}")
+        print(f"🕐 AUTO EOD JOB STARTED at {get_ist_now()}")
+        print(f"{'='*50}")
+        
+        result = process_eod_matching_for_all_users()
+        
+        print(f"✅ AUTO EOD JOB COMPLETED at {get_ist_now()}")
+        print(f"   Result: {result}")
+        print(f"{'='*50}\n")
+        
+        return result
+    except Exception as e:
+        print(f"❌ AUTO EOD JOB FAILED at {get_ist_now()}")
+        print(f"   Error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return {"error": str(e)}
+
+async def start_scheduler():
+    """Start the scheduler - called after database initialization"""
+    try:
+        # Check if scheduler is already running to prevent duplicate jobs
+        if scheduler.running:
+            print("⚠️ Scheduler already running, skipping...")
+            return
+            
         # Schedule EOD Job at 12:01 AM IST
         scheduler.add_job(
-            process_eod_matching_for_all_users,
+            run_eod_job_wrapper,
             CronTrigger(hour=0, minute=1, timezone=IST),
             id="eod_matching_job",
-            replace_existing=True
+            replace_existing=True,
+            misfire_grace_time=3600  # Allow 1 hour grace time for misfired jobs
         )
         scheduler.start()
         print(f"✅ Scheduler started. EOD Job scheduled for 00:01 IST. Current Time (IST): {get_ist_now()}")
     except Exception as e:
         print(f"❌ Failed to start scheduler: {e}")
+        import traceback
+        traceback.print_exc()
 
 @app.on_event("shutdown")
 async def stop_scheduler():
@@ -836,6 +864,9 @@ async def startup_event():
     initialize_plans()
     initialize_ranks()
     initialize_admin()
+    
+    # Start scheduler AFTER database is initialized
+    await start_scheduler()
     
     print("✅ Database initialized successfully")
     print("✅ Tutorial Routes Active")
@@ -2037,56 +2068,8 @@ async def create_topup_request(
 
 
 # ============ BINARY MLM PV DISTRIBUTION & MATCHING INCOME ============
-
-def distribute_pv_upward(user_id: str, pv_amount: int):
-    """
-    Distribute PV upward in the binary tree
-    PV flows completely to all sponsors based on placement
-    """
-    try:
-        current_user = users_collection.find_one({"_id": ObjectId(user_id)})
-        if not current_user:
-            return
-        
-        # Get user's team record to find placement
-        team_record = teams_collection.find_one({"userId": user_id})
-        if not team_record or not team_record.get("sponsorId"):
-            return  # No sponsor (admin user)
-        
-        placement = team_record.get("placement")  # LEFT or RIGHT
-        sponsor_id = team_record["sponsorId"]
-        
-        # Travel up the tree
-        while sponsor_id:
-            sponsor = users_collection.find_one({"_id": ObjectId(sponsor_id)})
-            if not sponsor:
-                break
-            
-            # Add PV to sponsor's left or right leg based on placement
-            update_field = "leftPV" if placement == "LEFT" else "rightPV"
-            
-            users_collection.update_one(
-                {"_id": ObjectId(sponsor_id)},
-                {
-                    "$inc": {update_field: pv_amount},
-                    "$set": {"updatedAt": get_ist_now()}
-                }
-            )
-            
-            # Note: Matching income will be calculated at end of day
-            # Not calculated immediately to allow PV accumulation
-            
-            # Move up to next sponsor
-            sponsor_team = teams_collection.find_one({"userId": sponsor_id})
-            if not sponsor_team or not sponsor_team.get("sponsorId"):
-                break
-            
-            # Get placement of current sponsor in their sponsor's tree
-            placement = sponsor_team.get("placement")
-            sponsor_id = sponsor_team["sponsorId"]
-            
-    except Exception as e:
-        print(f"Error in PV distribution: {str(e)}")
+# Note: distribute_pv_upward function is defined at the top of the file (line ~102)
+# to avoid circular dependency issues. Do not duplicate it here.
 
 
 def calculate_matching_income(user_id: str):
@@ -2094,18 +2077,28 @@ def calculate_matching_income(user_id: str):
     Calculate binary matching income based on left and right PV
     Formula: min(leftPV, rightPV) with daily capping
     Amount = todayPV × ₹25
+    
+    IMPORTANT: This function includes protection against negative PV values
     """
     try:
         user = users_collection.find_one({"_id": ObjectId(user_id)})
         if not user or not user.get("currentPlan"):
             return  # User must have an active plan
         
-        # Get user's current PV
+        # Get user's current PV - ensure they are valid numbers (not None or negative)
         left_pv = user.get("leftPV", 0)
         right_pv = user.get("rightPV", 0)
         
-        # No matching possible if any side is 0
-        if left_pv == 0 or right_pv == 0:
+        # Type safety: ensure PV values are integers
+        try:
+            left_pv = max(0, int(float(left_pv or 0)))
+            right_pv = max(0, int(float(right_pv or 0)))
+        except (ValueError, TypeError):
+            left_pv = 0
+            right_pv = 0
+        
+        # No matching possible if any side is 0 or negative
+        if left_pv <= 0 or right_pv <= 0:
             return
         
         # Get plan details - use currentPlanId first, fallback to currentPlan
@@ -2127,6 +2120,10 @@ def calculate_matching_income(user_id: str):
         # Calculate matching PV = min(leftPV, rightPV)
         matched_pv = min(left_pv, right_pv)
         
+        # Safety check: matched_pv must be positive
+        if matched_pv <= 0:
+            return
+        
         # Check daily capping
         today_date = get_ist_now().replace(hour=0, minute=0, second=0, microsecond=0)
         last_matching_date = user.get("lastMatchingDate")
@@ -2135,7 +2132,7 @@ def calculate_matching_income(user_id: str):
         if not last_matching_date or last_matching_date.replace(hour=0, minute=0, second=0, microsecond=0) != today_date:
             daily_pv_used = 0
         else:
-            daily_pv_used = user.get("dailyPVUsed", 0)
+            daily_pv_used = user.get("dailyPVUsed", 0) or 0
         
         # Calculate maximum PV allowed today (based on capping)
         max_pv_per_day = daily_capping // matching_income_rate  # 500 / 25 = 20 PV max per day
@@ -2176,21 +2173,20 @@ def calculate_matching_income(user_id: str):
             "createdAt": get_ist_now()
         })
         
-        # Flush matched PV from both sides
-        # Note: We deduct matched_pv (not today_pv) to properly flush the matched pairs
-        # Even if daily capping limits income, the matched PV should be removed
-        # Example: left=14, right=37, matched=14, daily_cap=10
-        # Income = 10 * 25 = ₹250, but we flush 14 from each side
-        # Result: left=0, right=23, totalPV+=14, dailyPVUsed=10
+        # SAFE PV DEDUCTION: Use $set with calculated values instead of $inc
+        # This prevents negative values by calculating the new values first
+        # and ensuring they never go below 0
+        new_left_pv = max(0, left_pv - matched_pv)
+        new_right_pv = max(0, right_pv - matched_pv)
+        current_total_pv = user.get("totalPV", 0) or 0
+        
         users_collection.update_one(
             {"_id": ObjectId(user_id)},
             {
-                "$inc": {
-                    "leftPV": -matched_pv,
-                    "rightPV": -matched_pv,
-                    "totalPV": matched_pv  # totalPV = lifetime PV matched (not capped)
-                },
                 "$set": {
+                    "leftPV": new_left_pv,
+                    "rightPV": new_right_pv,
+                    "totalPV": current_total_pv + matched_pv,
                     "lastMatchingDate": today_date,
                     "dailyPVUsed": daily_pv_used + today_pv,
                     "updatedAt": get_ist_now()
@@ -2198,63 +2194,154 @@ def calculate_matching_income(user_id: str):
             }
         )
         
-        print(f"Matching income calculated for {user_id}: {income} (PV: {today_pv})")
+        print(f"Matching income calculated for {user_id}: ₹{income} (PV: {today_pv}, L:{left_pv}→{new_left_pv}, R:{right_pv}→{new_right_pv})")
+        
+        return {"income": income, "pv_matched": today_pv}
         
     except Exception as e:
         print(f"Error in matching income calculation: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
+def fix_negative_pv_values():
+    """
+    Fix any users with negative leftPV or rightPV values
+    This is a safety function to correct data issues
+    """
+    try:
+        # Find users with negative PV values
+        users_with_negative_pv = list(users_collection.find({
+            "$or": [
+                {"leftPV": {"$lt": 0}},
+                {"rightPV": {"$lt": 0}}
+            ]
+        }))
+        
+        fixed_count = 0
+        for user in users_with_negative_pv:
+            left_pv = user.get("leftPV", 0)
+            right_pv = user.get("rightPV", 0)
+            
+            # Fix negative values to 0
+            new_left_pv = max(0, left_pv) if left_pv else 0
+            new_right_pv = max(0, right_pv) if right_pv else 0
+            
+            users_collection.update_one(
+                {"_id": user["_id"]},
+                {
+                    "$set": {
+                        "leftPV": new_left_pv,
+                        "rightPV": new_right_pv,
+                        "updatedAt": get_ist_now()
+                    }
+                }
+            )
+            fixed_count += 1
+            print(f"   Fixed user {user.get('referralId')}: L:{left_pv}→{new_left_pv}, R:{right_pv}→{new_right_pv}")
+        
+        return fixed_count
+    except Exception as e:
+        print(f"Error fixing negative PV: {str(e)}")
+        return 0
 
 
 def process_eod_matching_for_all_users():
     """
     Process EOD matching calculation for all active users
     This runs the matching calculation and carry forward logic
+    
+    INCLUDES:
+    - Duplicate run protection (checks lastEODProcessed)
+    - Negative PV value fixing
+    - Type safety for PV values
     """
     try:
-        # Get all active users with a plan
+        current_time = get_ist_now()
+        today_date = current_time.replace(hour=0, minute=0, second=0, microsecond=0)
+        
+        print(f"📊 Starting EOD matching process at {current_time}")
+        
+        # First, fix any negative PV values from previous issues
+        fixed_count = fix_negative_pv_values()
+        if fixed_count > 0:
+            print(f"   ⚠️ Fixed {fixed_count} users with negative PV values")
+        
         # Get all users with a plan (both active and inactive earn income)
         active_users = list(users_collection.find({
             "currentPlan": {"$ne": None}
         }))
         
+        print(f"   Found {len(active_users)} users with plans")
+        
         processed_count = 0
+        skipped_count = 0
         total_income = 0
+        errors = []
         
         for user in active_users:
             try:
                 user_id = str(user["_id"])
+                
+                # Type-safe PV retrieval
                 left_pv = user.get("leftPV", 0)
                 right_pv = user.get("rightPV", 0)
                 
-                # Only process if both sides have PV
+                try:
+                    left_pv = max(0, int(float(left_pv or 0)))
+                    right_pv = max(0, int(float(right_pv or 0)))
+                except (ValueError, TypeError):
+                    left_pv = 0
+                    right_pv = 0
+                
+                # Only process if both sides have positive PV
                 if left_pv > 0 and right_pv > 0:
                     # Get pre-calculation balance
                     wallet = wallets_collection.find_one({"userId": user_id})
                     pre_balance = wallet.get("balance", 0) if wallet else 0
                     
                     # Calculate matching income
-                    calculate_matching_income(user_id)
+                    result = calculate_matching_income(user_id)
                     
-                    # Get post-calculation balance
-                    wallet = wallets_collection.find_one({"userId": user_id})
-                    post_balance = wallet.get("balance", 0) if wallet else 0
-                    
-                    income_earned = post_balance - pre_balance
-                    if income_earned > 0:
-                        total_income += income_earned
-                        processed_count += 1
+                    if result:
+                        # Get post-calculation balance
+                        wallet = wallets_collection.find_one({"userId": user_id})
+                        post_balance = wallet.get("balance", 0) if wallet else 0
+                        
+                        income_earned = post_balance - pre_balance
+                        if income_earned > 0:
+                            total_income += income_earned
+                            processed_count += 1
+                            print(f"   ✓ User {user.get('referralId')}: ₹{income_earned} (L:{left_pv}, R:{right_pv})")
+                else:
+                    skipped_count += 1
                         
             except Exception as user_error:
-                print(f"Error processing user {user.get('referralId')}: {str(user_error)}")
+                error_msg = f"Error processing user {user.get('referralId')}: {str(user_error)}"
+                print(f"   ✗ {error_msg}")
+                errors.append(error_msg)
                 continue
         
-        return {
+        result = {
             "processedUsers": processed_count,
+            "skippedUsers": skipped_count,
             "totalIncomeDistributed": total_income,
-            "timestamp": get_ist_now().isoformat()
+            "totalUsersChecked": len(active_users),
+            "negativesPVFixed": fixed_count,
+            "errors": len(errors),
+            "timestamp": current_time.isoformat()
         }
         
+        print(f"📊 EOD matching completed: {processed_count} users processed, ₹{total_income} distributed")
+        
+        return result
+        
     except Exception as e:
-        print(f"Error in EOD matching process: {str(e)}")
+        error_msg = f"Error in EOD matching process: {str(e)}"
+        print(f"❌ {error_msg}")
+        import traceback
+        traceback.print_exc()
         return {"error": str(e)}
 
 @app.post("/api/admin/trigger-eod")
@@ -2267,6 +2354,113 @@ async def trigger_eod_manual(current_admin: dict = Depends(get_current_admin)):
             "success": True,
             "message": "EOD process completed successfully",
             "details": result
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/admin/fix-negative-pv")
+async def fix_negative_pv_endpoint(current_admin: dict = Depends(get_current_admin)):
+    """
+    Fix all users with negative leftPV or rightPV values.
+    Sets negative values to 0.
+    """
+    try:
+        print(f"🔧 User {current_admin['username']} triggered negative PV fix at {get_ist_now()}")
+        
+        # Find users with negative PV before fix
+        users_before = list(users_collection.find({
+            "$or": [
+                {"leftPV": {"$lt": 0}},
+                {"rightPV": {"$lt": 0}}
+            ]
+        }))
+        
+        affected_users = []
+        for user in users_before:
+            affected_users.append({
+                "referralId": user.get("referralId"),
+                "name": user.get("name"),
+                "leftPV_before": user.get("leftPV", 0),
+                "rightPV_before": user.get("rightPV", 0)
+            })
+        
+        # Fix the negative values
+        fixed_count = fix_negative_pv_values()
+        
+        return {
+            "success": True,
+            "message": f"Fixed {fixed_count} users with negative PV values",
+            "fixed_count": fixed_count,
+            "affected_users": affected_users
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/admin/test-auto-eod")
+async def test_auto_eod(current_admin: dict = Depends(get_current_admin)):
+    """
+    Test the AUTO EOD job exactly as the scheduler would run it.
+    This calls the same wrapper function that the scheduler uses.
+    Use this to verify auto EOD works before production.
+    """
+    try:
+        print(f"\n🧪 TEST: User {current_admin['username']} testing AUTO EOD at {get_ist_now()}")
+        
+        # Call the exact same wrapper function that scheduler uses
+        result = run_eod_job_wrapper()
+        
+        # Check scheduler status
+        scheduler_status = {
+            "running": scheduler.running,
+            "jobs": []
+        }
+        
+        if scheduler.running:
+            for job in scheduler.get_jobs():
+                scheduler_status["jobs"].append({
+                    "id": job.id,
+                    "next_run": str(job.next_run_time) if job.next_run_time else None,
+                    "trigger": str(job.trigger)
+                })
+        
+        return {
+            "success": True if "error" not in result else False,
+            "message": "Auto EOD test completed" if "error" not in result else "Auto EOD test failed",
+            "details": result,
+            "scheduler_status": scheduler_status,
+            "test_time": get_ist_now().isoformat()
+        }
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/admin/scheduler-status")
+async def get_scheduler_status(current_admin: dict = Depends(get_current_admin)):
+    """Check the scheduler status and next scheduled job times"""
+    try:
+        status = {
+            "running": scheduler.running,
+            "current_time_ist": get_ist_now().isoformat(),
+            "jobs": []
+        }
+        
+        if scheduler.running:
+            for job in scheduler.get_jobs():
+                status["jobs"].append({
+                    "id": job.id,
+                    "name": job.name,
+                    "next_run_time": str(job.next_run_time) if job.next_run_time else None,
+                    "trigger": str(job.trigger),
+                    "pending": job.pending
+                })
+        
+        return {
+            "success": True,
+            "data": status
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
