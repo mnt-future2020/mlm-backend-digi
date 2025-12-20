@@ -249,7 +249,7 @@ async def start_scheduler():
         # Schedule EOD Job at 12:50 AM IST (TEMPORARY FOR TESTING)
         scheduler.add_job(
             run_eod_job_wrapper,
-            CronTrigger(hour=0, minute=55, timezone=IST),
+            CronTrigger(hour=1, minute=25, timezone=IST),
             id="eod_matching_job",
             replace_existing=True,
             misfire_grace_time=3600  # Allow 1 hour grace time for misfired jobs
