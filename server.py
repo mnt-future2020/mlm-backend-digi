@@ -246,10 +246,10 @@ async def start_scheduler():
             print("⚠️ Scheduler already running, skipping...")
             return
             
-        # Schedule EOD Job at 12:01 AM IST
+        # Schedule EOD Job at 12:50 AM IST (TEMPORARY FOR TESTING)
         scheduler.add_job(
             run_eod_job_wrapper,
-            CronTrigger(hour=0, minute=1, timezone=IST),
+            CronTrigger(hour=0, minute=55, timezone=IST),
             id="eod_matching_job",
             replace_existing=True,
             misfire_grace_time=3600  # Allow 1 hour grace time for misfired jobs
@@ -2125,11 +2125,25 @@ def calculate_matching_income(user_id: str):
             return
         
         # Check daily capping
-        today_date = get_ist_now().replace(hour=0, minute=0, second=0, microsecond=0)
+        # FIX: Remove timezone for comparison since MongoDB stores without timezone
+        today_date = get_ist_now().replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=None)
         last_matching_date = user.get("lastMatchingDate")
         
         # Reset daily PV if new day
-        if not last_matching_date or last_matching_date.replace(hour=0, minute=0, second=0, microsecond=0) != today_date:
+        # FIX: Convert lastMatchingDate to IST before comparing (MongoDB stores in UTC)
+        if last_matching_date:
+            # Convert UTC (from MongoDB) to IST, then get date
+            if last_matching_date.tzinfo is None:
+                # MongoDB stores without timezone, assume UTC
+                last_matching_date_utc = pytz.UTC.localize(last_matching_date)
+                last_matching_date_ist = last_matching_date_utc.astimezone(IST)
+            else:
+                last_matching_date_ist = last_matching_date.astimezone(IST)
+            last_matching_midnight = last_matching_date_ist.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=None)
+        else:
+            last_matching_midnight = None
+        
+        if not last_matching_midnight or last_matching_midnight != today_date:
             daily_pv_used = 0
         else:
             daily_pv_used = user.get("dailyPVUsed", 0) or 0
