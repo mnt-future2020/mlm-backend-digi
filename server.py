@@ -1925,6 +1925,27 @@ async def activate_plan(
         user_id = current_user["id"]
         user = users_collection.find_one({"_id": ObjectId(user_id)})
         
+        # DUPLICATE ACTIVATION PREVENTION
+        # Check if user already has an active plan
+        if user.get("currentPlan") and user.get("currentPlanId"):
+            raise HTTPException(
+                status_code=400, 
+                detail=f"You already have an active {user.get('currentPlan')} plan. Contact support to upgrade."
+            )
+        
+        # Check for recent activation attempts (prevent rapid duplicates)
+        five_minutes_ago = get_ist_now() - timedelta(minutes=5)
+        recent_activation = transactions_collection.find_one({
+            "fromUserId": user_id,
+            "type": "PLAN_ACTIVATION",
+            "createdAt": {"$gte": five_minutes_ago}
+        })
+        if recent_activation:
+            raise HTTPException(
+                status_code=429,
+                detail="Plan activation already processed recently. Please wait 5 minutes before trying again."
+            )
+        
         # Get admin user for crediting plan activation amount
         admin_user = users_collection.find_one({"role": "admin"})
         admin_id = str(admin_user["_id"]) if admin_user else None
@@ -3751,6 +3772,39 @@ async def approve_topup(
         
         # Get user details
         user = users_collection.find_one({"_id": ObjectId(user_id)})
+        
+        # DUPLICATE ACTIVATION PREVENTION
+        # Check if user already has an active plan
+        if user.get("currentPlan") and user.get("currentPlanId"):
+            # Mark topup as rejected with reason
+            topups_collection.update_one(
+                {"_id": ObjectId(topup_id)},
+                {
+                    "$set": {
+                        "status": "REJECTED",
+                        "rejectedAt": get_ist_now(),
+                        "rejectedBy": current_admin["id"],
+                        "rejectionReason": f"User already has an active {user.get('currentPlan')} plan"
+                    }
+                }
+            )
+            raise HTTPException(
+                status_code=400, 
+                detail=f"User already has an active {user.get('currentPlan')} plan. Request has been automatically rejected."
+            )
+        
+        # Check for recent activation attempts (prevent rapid duplicates)
+        five_minutes_ago = get_ist_now() - timedelta(minutes=5)
+        recent_activation = transactions_collection.find_one({
+            "fromUserId": user_id,
+            "type": "PLAN_ACTIVATION",
+            "createdAt": {"$gte": five_minutes_ago}
+        })
+        if recent_activation:
+            raise HTTPException(
+                status_code=429,
+                detail="Plan activation already processed recently. Please wait 5 minutes before trying again."
+            )
         
         # Get admin user for crediting plan activation amount
         admin_user = users_collection.find_one({"role": "admin"})
