@@ -2100,11 +2100,17 @@ def calculate_matching_income(user_id: str):
     Amount = todayPV × ₹25
     
     IMPORTANT: This function includes protection against negative PV values
+    IMPORTANT: Only processes ACTIVE users (isActive=True)
     """
     try:
         user = users_collection.find_one({"_id": ObjectId(user_id)})
         if not user or not user.get("currentPlan"):
             return  # User must have an active plan
+        
+        # Skip inactive users - they should not earn matching income
+        if not user.get("isActive", False):
+            print(f"Skipping matching income for inactive user {user.get('referralId')}")
+            return
         
         # Get user's current PV - ensure they are valid numbers (not None or negative)
         left_pv = user.get("leftPV", 0)
@@ -2291,6 +2297,7 @@ def process_eod_matching_for_all_users():
     - Duplicate run protection (checks lastEODProcessed)
     - Negative PV value fixing
     - Type safety for PV values
+    - Only processes ACTIVE users (isActive=True)
     """
     try:
         current_time = get_ist_now()
@@ -2303,12 +2310,21 @@ def process_eod_matching_for_all_users():
         if fixed_count > 0:
             print(f"   ⚠️ Fixed {fixed_count} users with negative PV values")
         
-        # Get all users with a plan (both active and inactive earn income)
+        # Get only ACTIVE users with a plan (inactive users should NOT earn income)
         active_users = list(users_collection.find({
-            "currentPlan": {"$ne": None}
+            "currentPlan": {"$ne": None},
+            "isActive": True  # Only process active users
         }))
         
-        print(f"   Found {len(active_users)} users with plans")
+        # Also count inactive users for logging
+        inactive_users_count = users_collection.count_documents({
+            "currentPlan": {"$ne": None},
+            "isActive": {"$ne": True}
+        })
+        
+        print(f"   Found {len(active_users)} active users with plans")
+        if inactive_users_count > 0:
+            print(f"   ⚠️ Skipping {inactive_users_count} inactive users (no EOD calculation)")
         
         processed_count = 0
         skipped_count = 0
@@ -2361,6 +2377,7 @@ def process_eod_matching_for_all_users():
         result = {
             "processedUsers": processed_count,
             "skippedUsers": skipped_count,
+            "inactiveUsersSkipped": inactive_users_count,
             "totalIncomeDistributed": total_income,
             "totalUsersChecked": len(active_users),
             "negativesPVFixed": fixed_count,
@@ -2368,7 +2385,7 @@ def process_eod_matching_for_all_users():
             "timestamp": current_time.isoformat()
         }
         
-        print(f"📊 EOD matching completed: {processed_count} users processed, ₹{total_income} distributed")
+        print(f"📊 EOD matching completed: {processed_count} users processed, ₹{total_income} distributed, {inactive_users_count} inactive users skipped")
         
         return result
         
@@ -3500,16 +3517,9 @@ async def approve_withdrawal(
 ):
     """Approve withdrawal request"""
     try:
-        withdrawal = withdrawals_collection.find_one({"_id": ObjectId(withdrawal_id)})
-        if not withdrawal:
-            raise HTTPException(status_code=404, detail="Withdrawal not found")
-        
-        if withdrawal["status"] != "PENDING":
-            raise HTTPException(status_code=400, detail="Withdrawal already processed")
-        
-        # Update withdrawal status
-        withdrawals_collection.update_one(
-            {"_id": ObjectId(withdrawal_id)},
+        # Use atomic findOneAndUpdate to prevent race conditions from double-clicks
+        withdrawal = withdrawals_collection.find_one_and_update(
+            {"_id": ObjectId(withdrawal_id), "status": "PENDING"},
             {
                 "$set": {
                     "status": "APPROVED",
@@ -3518,6 +3528,13 @@ async def approve_withdrawal(
                 }
             }
         )
+        
+        if not withdrawal:
+            # Check if withdrawal exists but was already processed
+            existing = withdrawals_collection.find_one({"_id": ObjectId(withdrawal_id)})
+            if existing:
+                raise HTTPException(status_code=400, detail="Withdrawal already processed")
+            raise HTTPException(status_code=404, detail="Withdrawal not found")
         
         # Update wallet
         wallets_collection.update_one(
@@ -3548,18 +3565,11 @@ async def reject_withdrawal(
 ):
     """Reject withdrawal request"""
     try:
-        withdrawal = withdrawals_collection.find_one({"_id": ObjectId(withdrawal_id)})
-        if not withdrawal:
-            raise HTTPException(status_code=404, detail="Withdrawal not found")
-        
-        if withdrawal["status"] != "PENDING":
-            raise HTTPException(status_code=400, detail="Withdrawal already processed")
-        
         reason = data.get("reason", "No reason provided")
         
-        # Update withdrawal status
-        withdrawals_collection.update_one(
-            {"_id": ObjectId(withdrawal_id)},
+        # Use atomic findOneAndUpdate to prevent race conditions from double-clicks
+        withdrawal = withdrawals_collection.find_one_and_update(
+            {"_id": ObjectId(withdrawal_id), "status": "PENDING"},
             {
                 "$set": {
                     "status": "REJECTED",
@@ -3570,6 +3580,13 @@ async def reject_withdrawal(
             }
         )
         
+        if not withdrawal:
+            # Check if withdrawal exists but was already processed
+            existing = withdrawals_collection.find_one({"_id": ObjectId(withdrawal_id)})
+            if existing:
+                raise HTTPException(status_code=400, detail="Withdrawal already processed")
+            raise HTTPException(status_code=404, detail="Withdrawal not found")
+        
         # Return amount to wallet
         wallets_collection.update_one(
             {"userId": withdrawal["userId"]},
@@ -3578,7 +3595,7 @@ async def reject_withdrawal(
         
         # Update transaction
         transactions_collection.update_one(
-            {"withdrawalId": withdrawal_id},
+            {"withdrawalId": str(withdrawal["_id"])},
             {"$set": {"status": "REJECTED"}}
         )
         
