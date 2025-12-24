@@ -918,7 +918,8 @@ async def register(user: UserRegister):
                 raise HTTPException(status_code=400, detail="Invalid plan ID")
         
         # Create user - only include email if provided (for sparse index to work)
-        # New users start with isActive=False and kycStatus=PENDING_KYC
+        # New users start with isActive=False unless they have a plan assigned
+        # If plan is assigned during registration, user is auto-activated
         user_data = {
             "name": user.name,
             "username": user.username,
@@ -927,14 +928,14 @@ async def register(user: UserRegister):
             "gender": user.gender,
             "referralId": referral_id,
             "role": "user",
-            "isActive": False,  # User is inactive until KYC is approved
+            "isActive": True if plan else False,  # Auto-activate if plan is assigned
             "kycStatus": "PENDING_KYC",  # KYC status flow: PENDING_KYC -> KYC_SUBMITTED -> ACTIVE/KYC_REJECTED
             "isEmailVerified": False,
             "placement": user.placement,
             "sponsorId": user.referralId,
             "currentPlan": plan["name"] if plan else None,
             "currentPlanId": user.planId if plan else None,
-            "activatedAt": None,
+            "activatedAt": get_ist_now() if plan else None,  # Set activation time if plan assigned
             "totalPV": 0,
             "leftPV": 0,
             "rightPV": 0,
@@ -977,6 +978,37 @@ async def register(user: UserRegister):
                     # Distribute PV to all ancestors based on placement
                     distribute_pv_upward(user_id, pv_amount)
 
+        # Add plan amount to admin revenue if plan is assigned during registration
+        if plan:
+            # Get admin user for crediting plan activation amount
+            admin_user = users_collection.find_one({"role": "admin"})
+            admin_id = str(admin_user["_id"]) if admin_user else None
+            
+            # Create PLAN_ACTIVATION transaction - this is ADMIN's REVENUE
+            transactions_collection.insert_one({
+                "userId": admin_id if admin_id else user_id,
+                "fromUserId": user_id,
+                "type": "PLAN_ACTIVATION",
+                "amount": plan["amount"],
+                "description": f"{user.name} activated {plan['name']} plan during registration - ₹{plan['amount']}",
+                "planName": plan["name"],
+                "status": "COMPLETED",
+                "createdAt": get_ist_now()
+            })
+            
+            # Update admin wallet with plan activation amount (REVENUE)
+            if admin_id:
+                wallets_collection.update_one(
+                    {"userId": admin_id},
+                    {
+                        "$inc": {
+                            "balance": plan["amount"],
+                            "totalEarnings": plan["amount"]
+                        },
+                        "$set": {"updatedAt": get_ist_now()}
+                    },
+                    upsert=True
+                )
         
         # Create access token
         access_token = create_access_token(data={"sub": user.username, "userId": user_id})
@@ -2648,6 +2680,14 @@ async def create_withdrawal_request(
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
         
+        # Check KYC verification status
+        kyc_submission = kyc_submissions_collection.find_one({"userId": current_user["id"]})
+        if not kyc_submission or kyc_submission.get("status") != "APPROVED":
+            raise HTTPException(
+                status_code=400, 
+                detail="KYC verification required. Please complete your KYC verification before requesting withdrawal."
+            )
+        
         user_referral_id = user.get("referralId")
         if user_referral_id:
             # Count direct referrals (users who used this user's referral ID as sponsor)
@@ -3004,12 +3044,16 @@ async def get_admin_earnings(current_admin: dict = Depends(get_current_admin)):
         admin_total_earnings = admin_wallet.get("totalEarnings", 0) if admin_wallet else 0
         admin_total_withdrawals = admin_wallet.get("totalWithdrawals", 0) if admin_wallet else 0
         
-        # ============ PLATFORM REVENUE (ALL PLAN ACTIVATIONS) ============
+        # ============ PLATFORM REVENUE (Admin's Total Earnings) ============
+        # Total Revenue = Admin's Total Earnings from wallet
+        total_platform_revenue = admin_total_earnings
+        
+        # Get plan activation transactions for reference/breakdown
         all_activations = list(transactions_collection.find({
             "type": "PLAN_ACTIVATION"
         }).sort("createdAt", DESCENDING))
         
-        total_platform_revenue = sum(txn.get("amount", 0) for txn in all_activations)
+        plan_activation_revenue = sum(txn.get("amount", 0) for txn in all_activations)
         
         # ============ ADMIN'S OWN EARNINGS ============
         # Admin's matching income (admin's personal binary matching)
@@ -3034,38 +3078,50 @@ async def get_admin_earnings(current_admin: dict = Depends(get_current_admin)):
         }).sort("createdAt", DESCENDING))
         admin_level_income = sum(txn.get("amount", 0) for txn in admin_level_txns)
         
-        # ============ TOTAL PAYOUTS TO ALL USERS ============
-        # ============ TOTAL PAYOUTS TO ALL USERS ============
+        # ============ TOTAL INCOME DISTRIBUTED TO USERS (for reporting) ============
         all_matching_paid = list(transactions_collection.find({
             "type": {"$in": ["MATCHING_INCOME", "MATCHING_BONUS"]}
         }).sort("createdAt", DESCENDING))
-        total_matching_paid = sum(txn.get("amount", 0) for txn in all_matching_paid)
+        total_matching_distributed = sum(txn.get("amount", 0) for txn in all_matching_paid)
         
         all_referral_paid = list(transactions_collection.find({
             "type": "REFERRAL_INCOME"
         }))
-        total_referral_paid = sum(txn.get("amount", 0) for txn in all_referral_paid)
+        total_referral_distributed = sum(txn.get("amount", 0) for txn in all_referral_paid)
         
         all_level_paid = list(transactions_collection.find({
             "type": "LEVEL_INCOME"
         }))
-        total_level_paid = sum(txn.get("amount", 0) for txn in all_level_paid)
+        total_level_distributed = sum(txn.get("amount", 0) for txn in all_level_paid)
         
-        total_payouts = total_matching_paid + total_referral_paid + total_level_paid
+        total_income_distributed = total_matching_distributed + total_referral_distributed + total_level_distributed
         
-        # Net Profit = Platform Revenue - Total Payouts
+        # ============ ACTUAL PAYOUTS (APPROVED WITHDRAWALS ONLY) ============
+        # Real money leaves the platform only when withdrawals are approved
+        approved_withdrawals = list(withdrawals_collection.find({
+            "status": "APPROVED"
+        }))
+        total_payouts = sum(w.get("amount", 0) for w in approved_withdrawals)
+        
+        # Net Profit = Platform Revenue - Actual Payouts (approved withdrawals)
         net_profit = total_platform_revenue - total_payouts
+        
+        # Pending liability = Income distributed but not yet withdrawn
+        pending_liability = total_income_distributed - total_payouts
         
         # Admin's total personal earnings
         admin_personal_earnings = admin_matching_income + admin_referral_income + admin_level_income
         
         # Income breakdown
         income_breakdown = {
-            "PLAN_ACTIVATION": total_platform_revenue,
-            "MATCHING_INCOME_PAID": total_matching_paid,
-            "REFERRAL_INCOME_PAID": total_referral_paid,
-            "LEVEL_INCOME_PAID": total_level_paid,
-            "TOTAL_PAYOUTS": total_payouts,
+            "PLAN_ACTIVATION": plan_activation_revenue,
+            "TOTAL_REVENUE": total_platform_revenue,  # Admin's total earnings
+            "MATCHING_INCOME_DISTRIBUTED": total_matching_distributed,
+            "REFERRAL_INCOME_DISTRIBUTED": total_referral_distributed,
+            "LEVEL_INCOME_DISTRIBUTED": total_level_distributed,
+            "TOTAL_INCOME_DISTRIBUTED": total_income_distributed,
+            "TOTAL_PAYOUTS": total_payouts,  # Only approved withdrawals
+            "PENDING_LIABILITY": pending_liability,
             "NET_PROFIT": net_profit
         }
         
@@ -3096,7 +3152,13 @@ async def get_admin_earnings(current_admin: dict = Depends(get_current_admin)):
         
         month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         
-        for txn in all_activations:
+        # Get all admin wallet credit transactions for today/month calculation
+        admin_credit_txns = list(transactions_collection.find({
+            "userId": admin_id,
+            "amount": {"$gt": 0}  # Only credits (positive amounts)
+        }).sort("createdAt", DESCENDING))
+        
+        for txn in admin_credit_txns:
             created_at = txn.get("createdAt")
             if created_at:
                 try:
@@ -3128,49 +3190,103 @@ async def get_admin_earnings(current_admin: dict = Depends(get_current_admin)):
                 except:
                     pass
         
-        # Recent transactions (all types)
+        # Recent transactions (Plan Activations, Admin's Matching Income, Approved Withdrawals)
         recent_transactions = []
         
-        # Get all income transactions
-        all_income_txns = list(transactions_collection.find({
-            "type": {"$in": ["PLAN_ACTIVATION", "MATCHING_INCOME", "MATCHING_BONUS", "REFERRAL_INCOME", "LEVEL_INCOME"]}
-        }).sort("createdAt", DESCENDING).limit(50))
+        # Get PLAN_ACTIVATION transactions (admin revenue)
+        plan_activation_txns = list(transactions_collection.find({
+            "type": "PLAN_ACTIVATION"
+        }).sort("createdAt", DESCENDING).limit(30))
         
-        for txn in all_income_txns:
+        # Get Admin's own MATCHING_INCOME transactions
+        admin_matching_txns = list(transactions_collection.find({
+            "userId": admin_id,
+            "type": {"$in": ["MATCHING_INCOME", "MATCHING_BONUS"]}
+        }).sort("createdAt", DESCENDING).limit(20))
+        
+        # Get APPROVED withdrawals
+        approved_withdrawals = list(withdrawals_collection.find({
+            "status": "APPROVED"
+        }).sort("processedAt", DESCENDING).limit(20))
+        
+        # Process Plan Activation transactions
+        for txn in plan_activation_txns:
             user = None
-            user_id = txn.get("userId")
+            from_user_id = txn.get("fromUserId")
+            if from_user_id:
+                try:
+                    user = users_collection.find_one({"_id": ObjectId(from_user_id)})
+                except:
+                    pass
+            
+            recent_transactions.append({
+                "id": str(txn["_id"]),
+                "type": "PLAN_ACTIVATION",
+                "userName": user.get("name") if user else "User",
+                "userReferralId": user.get("referralId") if user else "-",
+                "amount": txn.get("amount"),
+                "description": txn.get("description"),
+                "createdAt": txn.get("createdAt"),
+                "isAdminTransaction": False
+            })
+        
+        # Process Admin's Matching Income transactions
+        for txn in admin_matching_txns:
+            recent_transactions.append({
+                "id": str(txn["_id"]),
+                "type": "MATCHING_INCOME",
+                "userName": "Admin",
+                "userReferralId": admin_user.get("referralId") if admin_user else "-",
+                "amount": txn.get("amount"),
+                "description": txn.get("description"),
+                "createdAt": txn.get("createdAt"),
+                "isAdminTransaction": True
+            })
+        
+        # Process Approved Withdrawals
+        for withdrawal in approved_withdrawals:
+            user = None
+            user_id = withdrawal.get("userId")
             if user_id:
                 try:
                     user = users_collection.find_one({"_id": ObjectId(user_id)})
                 except:
                     pass
             
-            # Check if this is admin's own transaction
-            is_admin_txn = user_id == admin_id
-            
             recent_transactions.append({
-                "id": str(txn["_id"]),
-                "type": txn.get("type"),
-                "userName": user.get("name") if user else "System",
+                "id": str(withdrawal["_id"]),
+                "type": "WITHDRAWAL_APPROVED",
+                "userName": user.get("name") if user else "User",
                 "userReferralId": user.get("referralId") if user else "-",
-                "amount": txn.get("amount"),
-                "description": txn.get("description"),
-                "createdAt": txn.get("createdAt"),
-                "isAdminTransaction": is_admin_txn
+                "amount": withdrawal.get("amount"),
+                "description": f"Withdrawal approved - ₹{withdrawal.get('amount')}",
+                "createdAt": withdrawal.get("processedAt") or withdrawal.get("requestedAt"),
+                "isAdminTransaction": False
             })
+        
+        # Sort all transactions by createdAt descending
+        recent_transactions.sort(key=lambda x: x.get("createdAt") or datetime.min, reverse=True)
+        recent_transactions = recent_transactions[:50]  # Limit to 50
         
         return {
             "success": True,
             "data": {
                 # Platform Stats
                 "totalRevenue": total_platform_revenue,
-                "totalPayouts": total_payouts,
+                "totalPayouts": total_payouts,  # Only approved withdrawals
                 "netProfit": net_profit,
                 
-                # Payout breakdown
-                "totalMatchingPaid": total_matching_paid,
-                "totalReferralPaid": total_referral_paid,
-                "totalLevelPaid": total_level_paid,
+                # Income distributed to users (not yet withdrawn)
+                "totalIncomeDistributed": total_income_distributed,
+                "totalMatchingDistributed": total_matching_distributed,
+                "totalReferralDistributed": total_referral_distributed,
+                "totalLevelDistributed": total_level_distributed,
+                "pendingLiability": pending_liability,
+                
+                # Legacy fields for backward compatibility
+                "totalMatchingPaid": total_matching_distributed,
+                "totalReferralPaid": total_referral_distributed,
+                "totalLevelPaid": total_level_distributed,
                 
                 # Today's stats
                 "todayRevenue": today_revenue,
@@ -3790,10 +3906,12 @@ async def approve_topup(
         # Get user details
         user = users_collection.find_one({"_id": ObjectId(user_id)})
         
-        # DUPLICATE ACTIVATION PREVENTION
-        # Check if user already has an active plan
-        if user.get("currentPlan") and user.get("currentPlanId"):
-            # Mark topup as rejected with reason
+        # Check if this is a plan upgrade or first activation
+        current_plan_id = user.get("currentPlanId")
+        is_upgrade = False
+        
+        if current_plan_id and current_plan_id == plan_id:
+            # Same plan - reject (duplicate activation)
             topups_collection.update_one(
                 {"_id": ObjectId(topup_id)},
                 {
@@ -3801,14 +3919,40 @@ async def approve_topup(
                         "status": "REJECTED",
                         "rejectedAt": get_ist_now(),
                         "rejectedBy": current_admin["id"],
-                        "rejectionReason": f"User already has an active {user.get('currentPlan')} plan"
+                        "rejectionReason": f"User already has the same {user.get('currentPlan')} plan active"
                     }
                 }
             )
             raise HTTPException(
                 status_code=400, 
-                detail=f"User already has an active {user.get('currentPlan')} plan. Request has been automatically rejected."
+                detail=f"User already has the same {user.get('currentPlan')} plan active. Request has been automatically rejected."
             )
+        elif current_plan_id:
+            # Different plan - check if upgrade or downgrade
+            current_plan = plans_collection.find_one({"_id": ObjectId(current_plan_id)})
+            current_plan_amount = current_plan.get("amount", 0) if current_plan else 0
+            new_plan_amount = plan.get("amount", 0)
+            
+            if new_plan_amount < current_plan_amount:
+                # Downgrade - reject
+                topups_collection.update_one(
+                    {"_id": ObjectId(topup_id)},
+                    {
+                        "$set": {
+                            "status": "REJECTED",
+                            "rejectedAt": get_ist_now(),
+                            "rejectedBy": current_admin["id"],
+                            "rejectionReason": f"Plan downgrade not allowed. User has {user.get('currentPlan')} (₹{current_plan_amount}) and trying to get {plan['name']} (₹{new_plan_amount})"
+                        }
+                    }
+                )
+                raise HTTPException(
+                    status_code=400, 
+                    detail=f"Plan downgrade not allowed. User currently has {user.get('currentPlan')} plan (₹{current_plan_amount}). Cannot downgrade to {plan['name']} (₹{new_plan_amount})."
+                )
+            else:
+                # Upgrade allowed
+                is_upgrade = True
         
         # Check for recent activation attempts (prevent rapid duplicates)
         five_minutes_ago = get_ist_now() - timedelta(minutes=5)
@@ -3827,7 +3971,7 @@ async def approve_topup(
         admin_user = users_collection.find_one({"role": "admin"})
         admin_id = str(admin_user["_id"]) if admin_user else None
         
-        # Update user's current plan
+        # Update user's current plan AND activate the user
         users_collection.update_one(
             {"_id": ObjectId(user_id)},
             {
@@ -3836,19 +3980,23 @@ async def approve_topup(
                     "currentPlanId": str(plan["_id"]),
                     "currentPlanName": plan["name"],
                     "dailyPVLimit": plan.get("dailyCapping", 500) // 25,
+                    "isActive": True,  # Auto-activate user when plan is approved
                     "updatedAt": get_ist_now()
                 }
             }
         )
         
         # Create PLAN_ACTIVATION transaction - this is ADMIN's REVENUE
+        upgrade_text = " (Upgrade)" if is_upgrade else ""
         transactions_collection.insert_one({
             "userId": admin_id if admin_id else user_id,  # Credit to admin
             "fromUserId": user_id,  # Track which user activated
             "type": "PLAN_ACTIVATION",
             "amount": plan["amount"],
-            "description": f"{user.get('name', 'User')} activated {plan['name']} plan - ₹{plan['amount']}",
+            "description": f"{user.get('name', 'User')} activated {plan['name']} plan{upgrade_text} - ₹{plan['amount']}",
             "planName": plan["name"],
+            "isUpgrade": is_upgrade,
+            "previousPlan": user.get("currentPlan") if is_upgrade else None,
             "status": "COMPLETED",
             "createdAt": get_ist_now()
         })
@@ -3996,6 +4144,15 @@ async def get_dashboard_reports(
         total_withdrawals_result = list(withdrawals_collection.aggregate(total_withdrawals_pipeline))
         total_withdrawals = total_withdrawals_result[0]["total"] if total_withdrawals_result else 0
         
+        # Get admin's total earnings (Total Revenue)
+        admin_user = users_collection.find_one({"role": "admin"})
+        admin_id = str(admin_user["_id"]) if admin_user else None
+        admin_wallet = wallets_collection.find_one({"userId": admin_id}) if admin_id else None
+        total_revenue = admin_wallet.get("totalEarnings", 0) if admin_wallet else 0
+        
+        # Net Profit = Total Revenue - Approved Withdrawals
+        net_profit = total_revenue - total_withdrawals
+        
         # Pending withdrawals
         pending_withdrawals = withdrawals_collection.count_documents({"status": "PENDING"})
         pending_withdrawals_amount_pipeline = [
@@ -4092,6 +4249,8 @@ async def get_dashboard_reports(
                     "inactiveUsers": inactive_users,
                     "withPlans": with_plans,
                     "totalEarnings": total_earnings,
+                    "totalRevenue": total_revenue,
+                    "netProfit": net_profit,
                     "totalWithdrawals": total_withdrawals,
                     "pendingWithdrawals": pending_withdrawals,
                     "pendingWithdrawalsAmount": pending_withdrawals_amount,
