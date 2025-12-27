@@ -195,7 +195,7 @@ app = FastAPI(title="VSV Unite MLM API", version="1.0.0")
 # )
 cors_origins = os.getenv(
     "CORS_ORIGINS",
-    "https://mlm-frontend-digi.vercel.app"
+    "https://www.vsvunite.com"
 )
 
 allowed_origins = [origin.strip() for origin in cors_origins.split(",")]
