@@ -1469,8 +1469,8 @@ async def get_user_dashboard(current_user: dict = Depends(get_current_active_use
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/user/team/tree")
-async def get_team_tree(current_user: dict = Depends(get_current_active_user)):
-    """Get user's team tree (binary structure)"""
+async def get_team_tree(current_user: dict = Depends(get_current_user)):
+    """Get user's team tree (binary structure) - allows inactive users to view"""
     try:
         user_id = current_user["id"]
         
