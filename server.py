@@ -24,10 +24,19 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
 import requests
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-import requests
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 import traceback
+import cloudinary
+import cloudinary.uploader
+import base64
+
+# Cloudinary Configuration
+cloudinary.config(
+    cloud_name="dyyt85tdw",
+    api_key="256652515298836",
+    api_secret="K7c6xco4TL2USuHZmOJAqdnEL2k"
+)
+
 #kansha 
 
 # Auto-placement functions (moved from service to avoid import issues)
@@ -5417,7 +5426,6 @@ async def health_check():
 def is_valid_jpeg(base64_data: str) -> bool:
     """Validate if base64 data is a valid JPEG image"""
     try:
-        import base64
         # Remove data URL prefix if present
         if ',' in base64_data:
             base64_data = base64_data.split(',')[1]
@@ -5430,10 +5438,27 @@ def is_valid_jpeg(base64_data: str) -> bool:
     except Exception:
         return False
 
+def is_valid_image(base64_data: str) -> bool:
+    """Validate if base64 data is a valid image (JPEG or PNG)"""
+    try:
+        # Remove data URL prefix if present
+        if ',' in base64_data:
+            base64_data = base64_data.split(',')[1]
+        
+        # Decode base64
+        image_data = base64.b64decode(base64_data)
+        
+        # Check JPEG magic bytes (FFD8FF) or PNG magic bytes (89504E47)
+        is_jpeg = image_data[:3] == b'\xff\xd8\xff'
+        is_png = image_data[:4] == b'\x89PNG'
+        
+        return is_jpeg or is_png
+    except Exception:
+        return False
+
 def get_base64_size_kb(base64_data: str) -> float:
     """Get the size of base64 data in KB"""
     try:
-        import base64
         # Remove data URL prefix if present
         if ',' in base64_data:
             base64_data = base64_data.split(',')[1]
@@ -5443,6 +5468,36 @@ def get_base64_size_kb(base64_data: str) -> float:
         return len(image_data) / 1024
     except Exception:
         return 0
+
+def upload_to_cloudinary(base64_data: str, folder: str, public_id: str) -> str:
+    """Upload base64 image to Cloudinary and return the URL"""
+    try:
+        # Ensure proper data URL format
+        if not base64_data.startswith('data:'):
+            # Detect image type and add prefix
+            clean_base64 = base64_data.split(',')[1] if ',' in base64_data else base64_data
+            image_bytes = base64.b64decode(clean_base64)
+            
+            if image_bytes[:3] == b'\xff\xd8\xff':
+                base64_data = f"data:image/jpeg;base64,{clean_base64}"
+            elif image_bytes[:4] == b'\x89PNG':
+                base64_data = f"data:image/png;base64,{clean_base64}"
+            else:
+                base64_data = f"data:image/jpeg;base64,{clean_base64}"
+        
+        # Upload to Cloudinary
+        result = cloudinary.uploader.upload(
+            base64_data,
+            folder=folder,
+            public_id=public_id,
+            overwrite=True,
+            resource_type="image"
+        )
+        
+        return result.get("secure_url", "")
+    except Exception as e:
+        print(f"Cloudinary upload error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to upload image: {str(e)}")
 
 @app.post("/api/kyc/submit")
 async def submit_kyc(
@@ -5465,31 +5520,61 @@ async def submit_kyc(
             raise HTTPException(status_code=400, detail="KYC already submitted and pending review")
         
         # Validate required fields - Removed idNumber, added specific proofs
-        required_fields = ["name", "email", "phone", "address", "dob", "panCardBase64", "aadharCardBase64", "bankPassbookBase64"]
+        required_fields = ["name", "phone", "address", "dob", "panCardBase64", "aadharCardBase64", "bankPassbookBase64"]
         for field in required_fields:
             if not data.get(field):
                 raise HTTPException(status_code=400, detail=f"{field} is required")
         
         # Helper to validate image
         def validate_image(base64_str, field_name):
-            if not is_valid_jpeg(base64_str):
-                raise HTTPException(status_code=400, detail=f"{field_name} must be a valid JPEG image")
+            if not is_valid_image(base64_str):
+                raise HTTPException(status_code=400, detail=f"{field_name} must be a valid JPEG or PNG image")
             size_kb = get_base64_size_kb(base64_str)
-            if size_kb > 500:
-                raise HTTPException(status_code=400, detail=f"{field_name} must be under 500KB. Current size: {size_kb:.1f}KB")
+            if size_kb > 2048:  # Increased to 2MB for Cloudinary
+                raise HTTPException(status_code=400, detail=f"{field_name} must be under 2MB. Current size: {size_kb:.1f}KB")
             return base64_str
 
         # Validate all documents
-        pan_card = validate_image(data.get("panCardBase64", ""), "PAN Card")
-        aadhar_card = validate_image(data.get("aadharCardBase64", ""), "Aadhar Card")
-        bank_passbook = validate_image(data.get("bankPassbookBase64", ""), "Bank Passbook")
+        pan_card_base64 = validate_image(data.get("panCardBase64", ""), "PAN Card")
+        aadhar_card_base64 = validate_image(data.get("aadharCardBase64", ""), "Aadhar Card")
+        bank_passbook_base64 = validate_image(data.get("bankPassbookBase64", ""), "Bank Passbook")
         
-        # Validate profile photo if provided (JPEG only, max 500KB)
-        profile_photo = data.get("profilePhotoBase64", "")
-        if profile_photo:
-            validate_image(profile_photo, "Profile Photo")
+        # Validate profile photo if provided
+        profile_photo_base64 = data.get("profilePhotoBase64", "")
+        if profile_photo_base64:
+            validate_image(profile_photo_base64, "Profile Photo")
         
-        # Create KYC submission
+        # Generate unique ID for this KYC submission
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        
+        # Upload images to Cloudinary
+        pan_card_url = upload_to_cloudinary(
+            pan_card_base64, 
+            f"kyc/{user_id}", 
+            f"pan_card_{timestamp}"
+        )
+        
+        aadhar_card_url = upload_to_cloudinary(
+            aadhar_card_base64, 
+            f"kyc/{user_id}", 
+            f"aadhar_card_{timestamp}"
+        )
+        
+        bank_passbook_url = upload_to_cloudinary(
+            bank_passbook_base64, 
+            f"kyc/{user_id}", 
+            f"bank_passbook_{timestamp}"
+        )
+        
+        profile_photo_url = ""
+        if profile_photo_base64:
+            profile_photo_url = upload_to_cloudinary(
+                profile_photo_base64, 
+                f"kyc/{user_id}", 
+                f"profile_photo_{timestamp}"
+            )
+        
+        # Create KYC submission with Cloudinary URLs
         kyc_data = {
             "userId": user_id,
             "submittedBy": {
@@ -5506,10 +5591,10 @@ async def submit_kyc(
                 "nomineeName": data.get("nomineeName"),
                 "bank": data.get("bank", {})
             },
-            "panCardBase64": pan_card,
-            "aadharCardBase64": aadhar_card,
-            "bankPassbookBase64": bank_passbook,
-            "profilePhotoBase64": profile_photo,
+            "panCardUrl": pan_card_url,
+            "aadharCardUrl": aadhar_card_url,
+            "bankPassbookUrl": bank_passbook_url,
+            "profilePhotoUrl": profile_photo_url,
             "status": "SUBMITTED",
             "remarks": None,
             "createdAt": get_ist_now(),
@@ -5584,30 +5669,61 @@ async def submit_kyc_for_member(
             raise HTTPException(status_code=400, detail="KYC already submitted and pending review for this user")
         
         # Validate required fields
-        required_fields = ["name", "email", "phone", "address", "dob", "idNumber", "idProofBase64"]
+        required_fields = ["name", "phone", "address", "dob", "panCardBase64", "aadharCardBase64", "bankPassbookBase64"]
         for field in required_fields:
             if not data.get(field):
                 raise HTTPException(status_code=400, detail=f"{field} is required")
         
-        # Validate ID proof (JPEG only, max 500KB)
-        id_proof = data.get("idProofBase64", "")
-        if not is_valid_jpeg(id_proof):
-            raise HTTPException(status_code=400, detail="ID proof must be a valid JPEG image")
+        # Helper to validate image
+        def validate_image(base64_str, field_name):
+            if not is_valid_image(base64_str):
+                raise HTTPException(status_code=400, detail=f"{field_name} must be a valid JPEG or PNG image")
+            size_kb = get_base64_size_kb(base64_str)
+            if size_kb > 2048:  # 2MB limit for Cloudinary
+                raise HTTPException(status_code=400, detail=f"{field_name} must be under 2MB. Current size: {size_kb:.1f}KB")
+            return base64_str
         
-        size_kb = get_base64_size_kb(id_proof)
-        if size_kb > 500:
-            raise HTTPException(status_code=400, detail=f"ID proof must be under 500KB. Current size: {size_kb:.1f}KB")
+        # Validate all documents
+        pan_card_base64 = validate_image(data.get("panCardBase64", ""), "PAN Card")
+        aadhar_card_base64 = validate_image(data.get("aadharCardBase64", ""), "Aadhar Card")
+        bank_passbook_base64 = validate_image(data.get("bankPassbookBase64", ""), "Bank Passbook")
         
-        # Validate profile photo if provided (JPEG only, max 500KB)
-        profile_photo = data.get("profilePhotoBase64", "")
-        if profile_photo:
-            if not is_valid_jpeg(profile_photo):
-                raise HTTPException(status_code=400, detail="Profile photo must be a valid JPEG image")
-            photo_size_kb = get_base64_size_kb(profile_photo)
-            if photo_size_kb > 500:
-                raise HTTPException(status_code=400, detail=f"Profile photo must be under 500KB. Current size: {photo_size_kb:.1f}KB")
+        # Validate profile photo if provided
+        profile_photo_base64 = data.get("profilePhotoBase64", "")
+        if profile_photo_base64:
+            validate_image(profile_photo_base64, "Profile Photo")
         
-        # Create KYC submission
+        # Generate unique ID for this KYC submission
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        
+        # Upload images to Cloudinary
+        pan_card_url = upload_to_cloudinary(
+            pan_card_base64, 
+            f"kyc/{target_user_id}", 
+            f"pan_card_{timestamp}"
+        )
+        
+        aadhar_card_url = upload_to_cloudinary(
+            aadhar_card_base64, 
+            f"kyc/{target_user_id}", 
+            f"aadhar_card_{timestamp}"
+        )
+        
+        bank_passbook_url = upload_to_cloudinary(
+            bank_passbook_base64, 
+            f"kyc/{target_user_id}", 
+            f"bank_passbook_{timestamp}"
+        )
+        
+        profile_photo_url = ""
+        if profile_photo_base64:
+            profile_photo_url = upload_to_cloudinary(
+                profile_photo_base64, 
+                f"kyc/{target_user_id}", 
+                f"profile_photo_{timestamp}"
+            )
+        
+        # Create KYC submission with Cloudinary URLs
         kyc_data = {
             "userId": target_user_id,
             "submittedBy": {
@@ -5622,11 +5738,13 @@ async def submit_kyc_for_member(
                 "address": data.get("address"),
                 "sponsorReferralId": target_user.get("sponsorId", ""),
                 "dob": data.get("dob"),
-                "idNumber": data.get("idNumber"),
+                "nomineeName": data.get("nomineeName"),
                 "bank": data.get("bank", {})
             },
-            "idProofBase64": id_proof,
-            "profilePhotoBase64": profile_photo,
+            "panCardUrl": pan_card_url,
+            "aadharCardUrl": aadhar_card_url,
+            "bankPassbookUrl": bank_passbook_url,
+            "profilePhotoUrl": profile_photo_url,
             "status": "SUBMITTED",
             "remarks": None,
             "createdAt": get_ist_now(),
