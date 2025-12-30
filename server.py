@@ -1372,16 +1372,44 @@ async def get_user_dashboard(current_user: dict = Depends(get_current_active_use
             "totalWithdrawals": 0
         }
         
-        # Get team statistics
-        total_team = teams_collection.count_documents({"sponsorId": user_id})
-        left_team = teams_collection.count_documents({
+        # Helper function to count all downline recursively
+        def count_all_downline(parent_id, visited=None):
+            if visited is None:
+                visited = set()
+            if parent_id in visited:
+                return 0
+            visited.add(parent_id)
+            
+            count = 0
+            children = list(teams_collection.find({"sponsorId": parent_id}))
+            for child in children:
+                count += 1
+                count += count_all_downline(child["userId"], visited)
+            return count
+        
+        # Get direct team statistics
+        direct_left = teams_collection.count_documents({
             "sponsorId": user_id,
             "placement": "LEFT"
         })
-        right_team = teams_collection.count_documents({
+        direct_right = teams_collection.count_documents({
             "sponsorId": user_id,
             "placement": "RIGHT"
         })
+        
+        # Get total team count for each leg (all downline)
+        left_child = teams_collection.find_one({"sponsorId": user_id, "placement": "LEFT"})
+        right_child = teams_collection.find_one({"sponsorId": user_id, "placement": "RIGHT"})
+        
+        total_left = 0
+        total_right = 0
+        
+        if left_child:
+            total_left = 1 + count_all_downline(left_child["userId"])
+        if right_child:
+            total_right = 1 + count_all_downline(right_child["userId"])
+        
+        total_team = total_left + total_right
         
         # Get current plan (fetch fresh from database, not from JWT token)
         fresh_user = users_collection.find_one({"_id": ObjectId(user_id)})
@@ -1401,18 +1429,31 @@ async def get_user_dashboard(current_user: dict = Depends(get_current_active_use
                     current_plan = serialize_doc(plan)
         
         # Get additional financial stats
-        # Get additional financial stats
         try:
-            # 1. Today's Earnings
-            ist_now = get_ist_now()
-            start_of_day = ist_now.replace(hour=0, minute=0, second=0, microsecond=0)
+            # 1. Today's Earnings - Calculate from dailyPVUsed
+            # Each PV matched = ₹25 income
+            matching_income_rate = 25
+            daily_pv_used = fresh_user.get("dailyPVUsed", 0) if fresh_user else 0
             
-            todays_transactions = list(transactions_collection.find({
-                "userId": user_id,
-                "amount": {"$gt": 0},
-                "createdAt": {"$gte": start_of_day.isoformat()}
-            }))
-            todays_earnings = sum(t.get("amount", 0) for t in todays_transactions)
+            # Check if dailyPVUsed is from today
+            today_date = get_ist_now().replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=None)
+            last_matching_date = fresh_user.get("lastMatchingDate") if fresh_user else None
+            
+            if last_matching_date:
+                if last_matching_date.tzinfo is None:
+                    last_matching_date_utc = pytz.UTC.localize(last_matching_date)
+                    last_matching_date_ist = last_matching_date_utc.astimezone(IST)
+                else:
+                    last_matching_date_ist = last_matching_date.astimezone(IST)
+                last_matching_midnight = last_matching_date_ist.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=None)
+                
+                # Only count if it's from today
+                if last_matching_midnight == today_date:
+                    todays_earnings = daily_pv_used * matching_income_rate
+                else:
+                    todays_earnings = 0
+            else:
+                todays_earnings = 0
 
             # 2. Pending Withdrawals
             pending_payouts = list(withdrawals_collection.find({
@@ -1423,11 +1464,6 @@ async def get_user_dashboard(current_user: dict = Depends(get_current_active_use
 
             # 3. Referral Income (REMOVED)
             referral_income = 0
-            # referral_txns = list(transactions_collection.find({
-            #     "userId": user_id,
-            #     "type": "REFERRAL_BONUS"
-            # }))
-            # referral_income = sum(t.get("amount", 0) for t in referral_txns)
 
             # 4. Matching Income
             matching_txns = list(transactions_collection.find({
@@ -1464,8 +1500,11 @@ async def get_user_dashboard(current_user: dict = Depends(get_current_active_use
                 },
                 "team": {
                     "total": total_team,
-                    "left": left_team,
-                    "right": right_team
+                    "left": total_left,
+                    "right": total_right,
+                    "leftPV": fresh_user.get("leftPV", 0) if fresh_user else 0,
+                    "rightPV": fresh_user.get("rightPV", 0) if fresh_user else 0,
+                    "totalPV": fresh_user.get("totalPV", 0) if fresh_user else 0
                 },
                 "currentPlan": current_plan,
                 "rank": user_rank,
@@ -4249,6 +4288,44 @@ async def get_dashboard_reports(
             {"role": "user"}
         ).sort("createdAt", DESCENDING).limit(5))
         
+        # Get admin's team stats (PV and team counts)
+        admin_team_stats = {
+            "leftPV": 0,
+            "rightPV": 0,
+            "leftTeam": 0,
+            "rightTeam": 0,
+            "totalPV": 0
+        }
+        
+        if admin_user:
+            admin_team_stats["leftPV"] = admin_user.get("leftPV", 0)
+            admin_team_stats["rightPV"] = admin_user.get("rightPV", 0)
+            admin_team_stats["totalPV"] = admin_user.get("totalPV", 0)
+            
+            # Count total team members on each side (recursive)
+            def count_all_downline(parent_id, visited=None):
+                if visited is None:
+                    visited = set()
+                if parent_id in visited:
+                    return 0
+                visited.add(parent_id)
+                
+                count = 0
+                children = list(teams_collection.find({"sponsorId": parent_id}))
+                for child in children:
+                    count += 1
+                    count += count_all_downline(child["userId"], visited)
+                return count
+            
+            admin_id_str = str(admin_user["_id"])
+            left_child = teams_collection.find_one({"sponsorId": admin_id_str, "placement": "LEFT"})
+            right_child = teams_collection.find_one({"sponsorId": admin_id_str, "placement": "RIGHT"})
+            
+            if left_child:
+                admin_team_stats["leftTeam"] = 1 + count_all_downline(left_child["userId"])
+            if right_child:
+                admin_team_stats["rightTeam"] = 1 + count_all_downline(right_child["userId"])
+        
         return {
             "success": True,
             "data": {
@@ -4265,6 +4342,7 @@ async def get_dashboard_reports(
                     "pendingWithdrawalsAmount": pending_withdrawals_amount,
                     "recentRegistrations": recent_registrations
                 },
+                "adminTeam": admin_team_stats,
                 "planDistribution": plan_distribution,
                 "dailyReports": daily_reports,
                 "incomeBreakdown": income_types,
