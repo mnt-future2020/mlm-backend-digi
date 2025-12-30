@@ -77,3 +77,5 @@ uvicorn==0.32.1
 watchfiles==1.1.1
 websockets==15.0.1
 apscheduler
+cloudinary==1.44.1
+
