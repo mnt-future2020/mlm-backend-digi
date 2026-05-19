@@ -867,8 +867,28 @@ async def startup_event():
     # KYC indexes
     kyc_submissions_collection.create_index([("userId", ASCENDING)])
     kyc_submissions_collection.create_index([("status", ASCENDING)])
+    kyc_submissions_collection.create_index([("userId", ASCENDING), ("status", ASCENDING)])
     users_collection.create_index([("kycStatus", ASCENDING)])
-    
+
+    # Transaction indexes for earnings/reports queries
+    transactions_collection.create_index([("type", ASCENDING)])
+    transactions_collection.create_index([("createdAt", DESCENDING)])
+    transactions_collection.create_index([("type", ASCENDING), ("createdAt", DESCENDING)])
+
+    # Withdrawal indexes
+    withdrawals_collection.create_index([("status", ASCENDING)])
+    withdrawals_collection.create_index([("userId", ASCENDING)])
+    withdrawals_collection.create_index([("requestedAt", DESCENDING)])
+
+    # Topup indexes
+    topups_collection.create_index([("status", ASCENDING)])
+    topups_collection.create_index([("userId", ASCENDING)])
+
+    # User filter indexes
+    users_collection.create_index([("isActive", ASCENDING)])
+    users_collection.create_index([("role", ASCENDING), ("isActive", ASCENDING)])
+    users_collection.create_index([("currentPlan", ASCENDING)])
+
     # Initialize data
     initialize_plans()
     initialize_ranks()
@@ -3096,60 +3116,48 @@ async def get_admin_earnings(current_admin: dict = Depends(get_current_admin)):
         # Total Revenue = Admin's Total Earnings from wallet
         total_platform_revenue = admin_total_earnings
         
-        # Get plan activation transactions for reference/breakdown
-        all_activations = list(transactions_collection.find({
-            "type": "PLAN_ACTIVATION"
-        }).sort("createdAt", DESCENDING))
-        
-        plan_activation_revenue = sum(txn.get("amount", 0) for txn in all_activations)
-        
-        # ============ ADMIN'S OWN EARNINGS ============
-        # Admin's matching income (admin's personal binary matching)
-        # Ensure we only count positive values (credits), though matching income should always be positive
-        # Admin's matching income (admin's personal binary matching)
-        # Ensure we only count positive values (credits), though matching income should always be positive
-        admin_matching_txns = list(transactions_collection.find({
-            "userId": admin_id,
-            "type": {"$in": ["MATCHING_INCOME", "MATCHING_BONUS"]}
-        }).sort("createdAt", DESCENDING))
-        
-        # Taking abs() just in case, but logically should be positive
-        admin_matching_income = sum(abs(txn.get("amount", 0)) for txn in admin_matching_txns)
-        
-        # Admin's referral income (REMOVED)
+        # ============ AGGREGATED TOTALS (single query instead of multiple full scans) ============
+        # Get all transaction type totals in one aggregation
+        txn_totals_pipeline = [
+            {"$match": {"type": {"$in": [
+                "PLAN_ACTIVATION", "MATCHING_INCOME", "MATCHING_BONUS",
+                "REFERRAL_INCOME", "LEVEL_INCOME"
+            ]}}},
+            {"$group": {
+                "_id": "$type",
+                "total": {"$sum": "$amount"},
+                "adminTotal": {"$sum": {"$cond": [{"$eq": ["$userId", admin_id]}, {"$abs": "$amount"}, 0]}}
+            }}
+        ]
+        txn_totals = list(transactions_collection.aggregate(txn_totals_pipeline))
+        txn_totals_map = {t["_id"]: t for t in txn_totals}
+
+        plan_activation_revenue = txn_totals_map.get("PLAN_ACTIVATION", {}).get("total", 0)
+
+        # Admin's own earnings
+        admin_matching_income = (
+            txn_totals_map.get("MATCHING_INCOME", {}).get("adminTotal", 0) +
+            txn_totals_map.get("MATCHING_BONUS", {}).get("adminTotal", 0)
+        )
         admin_referral_income = 0
-        
-        # Admin's level income (if any)
-        admin_level_txns = list(transactions_collection.find({
-            "userId": admin_id,
-            "type": "LEVEL_INCOME"
-        }).sort("createdAt", DESCENDING))
-        admin_level_income = sum(txn.get("amount", 0) for txn in admin_level_txns)
-        
-        # ============ TOTAL INCOME DISTRIBUTED TO USERS (for reporting) ============
-        all_matching_paid = list(transactions_collection.find({
-            "type": {"$in": ["MATCHING_INCOME", "MATCHING_BONUS"]}
-        }).sort("createdAt", DESCENDING))
-        total_matching_distributed = sum(txn.get("amount", 0) for txn in all_matching_paid)
-        
-        all_referral_paid = list(transactions_collection.find({
-            "type": "REFERRAL_INCOME"
-        }))
-        total_referral_distributed = sum(txn.get("amount", 0) for txn in all_referral_paid)
-        
-        all_level_paid = list(transactions_collection.find({
-            "type": "LEVEL_INCOME"
-        }))
-        total_level_distributed = sum(txn.get("amount", 0) for txn in all_level_paid)
-        
+        admin_level_income = txn_totals_map.get("LEVEL_INCOME", {}).get("adminTotal", 0)
+
+        # Total income distributed to users
+        total_matching_distributed = (
+            txn_totals_map.get("MATCHING_INCOME", {}).get("total", 0) +
+            txn_totals_map.get("MATCHING_BONUS", {}).get("total", 0)
+        )
+        total_referral_distributed = txn_totals_map.get("REFERRAL_INCOME", {}).get("total", 0)
+        total_level_distributed = txn_totals_map.get("LEVEL_INCOME", {}).get("total", 0)
         total_income_distributed = total_matching_distributed + total_referral_distributed + total_level_distributed
-        
+
         # ============ ACTUAL PAYOUTS (APPROVED WITHDRAWALS ONLY) ============
-        # Real money leaves the platform only when withdrawals are approved
-        approved_withdrawals = list(withdrawals_collection.find({
-            "status": "APPROVED"
-        }))
-        total_payouts = sum(w.get("amount", 0) for w in approved_withdrawals)
+        payouts_pipeline = [
+            {"$match": {"status": "APPROVED"}},
+            {"$group": {"_id": None, "total": {"$sum": "$amount"}}}
+        ]
+        payouts_result = list(withdrawals_collection.aggregate(payouts_pipeline))
+        total_payouts = payouts_result[0]["total"] if payouts_result else 0
         
         # Net Profit = Platform Revenue - Actual Payouts (approved withdrawals)
         net_profit = total_platform_revenue - total_payouts
@@ -3181,92 +3189,86 @@ async def get_admin_earnings(current_admin: dict = Depends(get_current_admin)):
             "TOTAL": admin_personal_earnings
         }
         
-        # Plan activation breakdown by plan name
+        # Plan activation breakdown by plan name - use aggregation
+        plan_breakdown_pipeline = [
+            {"$match": {"type": "PLAN_ACTIVATION"}},
+            {"$group": {"_id": "$description", "total": {"$sum": "$amount"}}}
+        ]
+        plan_breakdown_result = list(transactions_collection.aggregate(plan_breakdown_pipeline))
         income_by_plan = {}
-        for txn in all_activations:
-            desc = txn.get("description", "")
+        for entry in plan_breakdown_result:
+            desc = entry.get("_id", "")
             for plan in ["Basic", "Standard", "Advanced", "Premium"]:
-                if plan in desc:
-                    income_by_plan[plan] = income_by_plan.get(plan, 0) + txn.get("amount", 0)
+                if plan in str(desc):
+                    income_by_plan[plan] = income_by_plan.get(plan, 0) + entry.get("total", 0)
                     break
-        
-        # Today's calculations - handle timezone-naive dates safely
+
+        # Today's calculations
         now = get_ist_now()
         today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        
-        today_revenue = 0
-        today_matching_paid_amount = 0
-        month_revenue = 0
-        
         month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         
-        # Get all admin wallet credit transactions for today/month calculation
-        admin_credit_txns = list(transactions_collection.find({
-            "userId": admin_id,
-            "amount": {"$gt": 0}  # Only credits (positive amounts)
-        }).sort("createdAt", DESCENDING))
-        
-        for txn in admin_credit_txns:
-            created_at = txn.get("createdAt")
-            if created_at:
-                try:
-                    # Make timezone-naive for comparison if needed
-                    if hasattr(created_at, 'tzinfo') and created_at.tzinfo is not None:
-                        txn_date = created_at
-                    else:
-                        txn_date = IST.localize(created_at) if created_at else None
-                    
-                    if txn_date:
-                        if txn_date >= today_start:
-                            today_revenue += txn.get("amount", 0)
-                        if txn_date >= month_start:
-                            month_revenue += txn.get("amount", 0)
-                except:
-                    pass
-        
-        for txn in all_matching_paid:
-            created_at = txn.get("createdAt")
-            if created_at:
-                try:
-                    if hasattr(created_at, 'tzinfo') and created_at.tzinfo is not None:
-                        txn_date = created_at
-                    else:
-                        txn_date = IST.localize(created_at) if created_at else None
-                    
-                    if txn_date and txn_date >= today_start:
-                        today_matching_paid_amount += txn.get("amount", 0)
-                except:
-                    pass
-        
+        # Today/month revenue - use aggregation instead of fetching all docs
+        today_revenue_pipeline = [
+            {"$match": {"userId": admin_id, "amount": {"$gt": 0}, "createdAt": {"$gte": today_start}}},
+            {"$group": {"_id": None, "total": {"$sum": "$amount"}}}
+        ]
+        today_revenue_result = list(transactions_collection.aggregate(today_revenue_pipeline))
+        today_revenue = today_revenue_result[0]["total"] if today_revenue_result else 0
+
+        month_revenue_pipeline = [
+            {"$match": {"userId": admin_id, "amount": {"$gt": 0}, "createdAt": {"$gte": month_start}}},
+            {"$group": {"_id": None, "total": {"$sum": "$amount"}}}
+        ]
+        month_revenue_result = list(transactions_collection.aggregate(month_revenue_pipeline))
+        month_revenue = month_revenue_result[0]["total"] if month_revenue_result else 0
+
+        today_matching_pipeline = [
+            {"$match": {"type": {"$in": ["MATCHING_INCOME", "MATCHING_BONUS"]}, "createdAt": {"$gte": today_start}}},
+            {"$group": {"_id": None, "total": {"$sum": "$amount"}}}
+        ]
+        today_matching_result = list(transactions_collection.aggregate(today_matching_pipeline))
+        today_matching_paid_amount = today_matching_result[0]["total"] if today_matching_result else 0
+
         # Recent transactions (Plan Activations, Admin's Matching Income, Approved Withdrawals)
         recent_transactions = []
-        
+
         # Get PLAN_ACTIVATION transactions (admin revenue)
         plan_activation_txns = list(transactions_collection.find({
             "type": "PLAN_ACTIVATION"
         }).sort("createdAt", DESCENDING).limit(30))
-        
+
         # Get Admin's own MATCHING_INCOME transactions
         admin_matching_txns = list(transactions_collection.find({
             "userId": admin_id,
             "type": {"$in": ["MATCHING_INCOME", "MATCHING_BONUS"]}
         }).sort("createdAt", DESCENDING).limit(20))
-        
+
         # Get APPROVED withdrawals
-        approved_withdrawals = list(withdrawals_collection.find({
+        approved_withdrawals_recent = list(withdrawals_collection.find({
             "status": "APPROVED"
         }).sort("processedAt", DESCENDING).limit(20))
-        
+
+        # Batch fetch users for plan activation txns (avoid N+1)
+        from_user_ids = list(set(
+            ObjectId(txn["fromUserId"]) for txn in plan_activation_txns
+            if txn.get("fromUserId")
+        ))
+        withdrawal_user_ids = list(set(
+            ObjectId(w["userId"]) for w in approved_withdrawals_recent
+            if w.get("userId")
+        ))
+        all_user_ids = list(set(from_user_ids + withdrawal_user_ids))
+        batch_users = list(users_collection.find({"_id": {"$in": all_user_ids}})) if all_user_ids else []
+        batch_users_map = {str(u["_id"]): u for u in batch_users}
+
         # Process Plan Activation transactions
         for txn in plan_activation_txns:
             user = None
             from_user_id = txn.get("fromUserId")
             if from_user_id:
-                try:
-                    user = users_collection.find_one({"_id": ObjectId(from_user_id)})
-                except:
-                    pass
-            
+                user = batch_users_map.get(from_user_id)
+
             recent_transactions.append({
                 "id": str(txn["_id"]),
                 "type": "PLAN_ACTIVATION",
@@ -3292,15 +3294,9 @@ async def get_admin_earnings(current_admin: dict = Depends(get_current_admin)):
             })
         
         # Process Approved Withdrawals
-        for withdrawal in approved_withdrawals:
-            user = None
-            user_id = withdrawal.get("userId")
-            if user_id:
-                try:
-                    user = users_collection.find_one({"_id": ObjectId(user_id)})
-                except:
-                    pass
-            
+        for withdrawal in approved_withdrawals_recent:
+            user = batch_users_map.get(withdrawal.get("userId"))
+
             recent_transactions.append({
                 "id": str(withdrawal["_id"]),
                 "type": "WITHDRAWAL_APPROVED",
@@ -3359,12 +3355,12 @@ async def get_admin_earnings(current_admin: dict = Depends(get_current_admin)):
                 
                 # Breakdowns
                 "incomeBreakdown": income_breakdown,
-                "totalActivations": len(all_activations),
+                "totalActivations": transactions_collection.count_documents({"type": "PLAN_ACTIVATION"}),
                 "incomeByPlan": income_by_plan,
-                
+
                 # Transactions
                 "recentTransactions": serialize_doc(recent_transactions),
-                "allTransactions": serialize_doc(all_activations)
+                "allTransactions": serialize_doc(plan_activation_txns)
             }
         }
     except Exception as e:
@@ -4166,16 +4162,28 @@ async def get_dashboard_reports(
 ):
     """Get dashboard analytics and reports"""
     try:
-        # Total users count (including all users - admin + regular users)
-        total_users = users_collection.count_documents({})
-        active_users = users_collection.count_documents({"isActive": True})
-        inactive_users = users_collection.count_documents({"isActive": False})
-        
-        # Users with plans
-        with_plans = users_collection.count_documents({
-            "currentPlan": {"$exists": True, "$ne": None, "$ne": ""}
-        })
-        
+        # ============ USER COUNTS - single aggregation instead of 3 count_documents ============
+        user_counts_pipeline = [
+            {"$group": {
+                "_id": None,
+                "total": {"$sum": 1},
+                "active": {"$sum": {"$cond": [{"$eq": ["$isActive", True]}, 1, 0]}},
+                "inactive": {"$sum": {"$cond": [{"$eq": ["$isActive", False]}, 1, 0]}},
+                "withPlans": {"$sum": {"$cond": [
+                    {"$and": [
+                        {"$ne": ["$currentPlan", None]},
+                        {"$ne": ["$currentPlan", ""]}
+                    ]}, 1, 0
+                ]}}
+            }}
+        ]
+        user_counts_result = list(users_collection.aggregate(user_counts_pipeline))
+        uc = user_counts_result[0] if user_counts_result else {"total": 0, "active": 0, "inactive": 0, "withPlans": 0}
+        total_users = uc["total"]
+        active_users = uc["active"]
+        inactive_users = uc["inactive"]
+        with_plans = uc["withPlans"]
+
         # Total earnings (sum of all credit transactions)
         total_earnings_pipeline = [
             {"$match": {"amount": {"$gt": 0}}},
@@ -4183,112 +4191,119 @@ async def get_dashboard_reports(
         ]
         total_earnings_result = list(transactions_collection.aggregate(total_earnings_pipeline))
         total_earnings = total_earnings_result[0]["total"] if total_earnings_result else 0
-        
-        # Total withdrawals
-        total_withdrawals_pipeline = [
-            {"$match": {"status": "APPROVED"}},
-            {"$group": {"_id": None, "total": {"$sum": "$amount"}}}
+
+        # ============ WITHDRAWALS - single aggregation for both approved + pending ============
+        withdrawal_stats_pipeline = [
+            {"$group": {
+                "_id": "$status",
+                "total": {"$sum": "$amount"},
+                "count": {"$sum": 1}
+            }}
         ]
-        total_withdrawals_result = list(withdrawals_collection.aggregate(total_withdrawals_pipeline))
-        total_withdrawals = total_withdrawals_result[0]["total"] if total_withdrawals_result else 0
-        
+        withdrawal_stats = list(withdrawals_collection.aggregate(withdrawal_stats_pipeline))
+        withdrawal_map = {w["_id"]: w for w in withdrawal_stats}
+        total_withdrawals = withdrawal_map.get("APPROVED", {}).get("total", 0)
+        pending_withdrawals = withdrawal_map.get("PENDING", {}).get("count", 0)
+        pending_withdrawals_amount = withdrawal_map.get("PENDING", {}).get("total", 0)
+
         # Get admin's total earnings (Total Revenue)
         admin_user = users_collection.find_one({"role": "admin"})
         admin_id = str(admin_user["_id"]) if admin_user else None
         admin_wallet = wallets_collection.find_one({"userId": admin_id}) if admin_id else None
         total_revenue = admin_wallet.get("totalEarnings", 0) if admin_wallet else 0
-        
+
         # Net Profit = Total Revenue - Approved Withdrawals
         net_profit = total_revenue - total_withdrawals
-        
-        # Pending withdrawals
-        pending_withdrawals = withdrawals_collection.count_documents({"status": "PENDING"})
-        pending_withdrawals_amount_pipeline = [
-            {"$match": {"status": "PENDING"}},
-            {"$group": {"_id": None, "total": {"$sum": "$amount"}}}
+
+        # Plan distribution - single aggregation
+        all_plans = list(plans_collection.find())
+        plans_name_map = {}
+        for plan in all_plans:
+            plans_name_map[str(plan["_id"])] = plan["name"]
+            plans_name_map[plan["name"]] = plan["name"]
+
+        plan_dist_pipeline = [
+            {"$match": {"currentPlan": {"$ne": None}}},
+            {"$group": {"_id": "$currentPlan", "count": {"$sum": 1}}}
         ]
-        pending_withdrawals_amount_result = list(withdrawals_collection.aggregate(pending_withdrawals_amount_pipeline))
-        pending_withdrawals_amount = pending_withdrawals_amount_result[0]["total"] if pending_withdrawals_amount_result else 0
-        
-        # Plan distribution
-        plan_distribution = {}
-        for plan in plans_collection.find():
-            # Count users with this plan (handle both ObjectId and string formats)
-            plan_id_str = str(plan["_id"])
-            count = users_collection.count_documents({
-                "$or": [
-                    {"currentPlan": plan_id_str},
-                    {"currentPlan": plan["_id"]},
-                    {"currentPlan": plan["name"]}
-                ]
-            })
-            plan_distribution[plan["name"]] = count
-        
+        plan_dist_result = list(users_collection.aggregate(plan_dist_pipeline))
+
+        plan_distribution = {plan["name"]: 0 for plan in all_plans}
+        for entry in plan_dist_result:
+            plan_key = str(entry["_id"])
+            plan_name = plans_name_map.get(plan_key)
+            if plan_name:
+                plan_distribution[plan_name] = plan_distribution.get(plan_name, 0) + entry["count"]
+
+        # ============ DAILY REPORTS - 3 aggregations instead of 21 queries ============
+        seven_days_ago = get_ist_now().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=6)
+
         # Recent registrations (last 7 days)
-        seven_days_ago = get_ist_now() - timedelta(days=7)
         recent_registrations = users_collection.count_documents({
             "role": "user",
             "createdAt": {"$gte": seven_days_ago}
         })
-        
-        # Daily business report (last 7 days)
+
+        # Daily new users - single aggregation
+        daily_users_pipeline = [
+            {"$match": {"role": "user", "createdAt": {"$gte": seven_days_ago}}},
+            {"$group": {
+                "_id": {"$dateToString": {"format": "%Y-%m-%d", "date": "$createdAt"}},
+                "count": {"$sum": 1}
+            }}
+        ]
+        daily_users_result = {d["_id"]: d["count"] for d in users_collection.aggregate(daily_users_pipeline)}
+
+        # Daily topups - single aggregation
+        daily_topups_pipeline = [
+            {"$match": {"status": "APPROVED", "approvedAt": {"$gte": seven_days_ago}}},
+            {"$group": {
+                "_id": {"$dateToString": {"format": "%Y-%m-%d", "date": "$approvedAt"}},
+                "total": {"$sum": "$amount"}
+            }}
+        ]
+        daily_topups_result = {d["_id"]: d["total"] for d in topups_collection.aggregate(daily_topups_pipeline)}
+
+        # Daily payouts - single aggregation
+        daily_payouts_pipeline = [
+            {"$match": {"status": "APPROVED", "approvedAt": {"$gte": seven_days_ago}}},
+            {"$group": {
+                "_id": {"$dateToString": {"format": "%Y-%m-%d", "date": "$approvedAt"}},
+                "total": {"$sum": "$amount"}
+            }}
+        ]
+        daily_payouts_result = {d["_id"]: d["total"] for d in withdrawals_collection.aggregate(daily_payouts_pipeline)}
+
+        # Build daily reports from aggregated data
         daily_reports = []
         for i in range(6, -1, -1):
-            day_start = get_ist_now().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=i)
-            day_end = day_start + timedelta(days=1)
-            
-            # New users on this day
-            new_users = users_collection.count_documents({
-                "role": "user",
-                "createdAt": {"$gte": day_start, "$lt": day_end}
-            })
-            
-            # Topups on this day
-            topups_pipeline = [
-                {"$match": {
-                    "status": "APPROVED",
-                    "approvedAt": {"$gte": day_start, "$lt": day_end}
-                }},
-                {"$group": {"_id": None, "total": {"$sum": "$amount"}}}
-            ]
-            topups_result = list(topups_collection.aggregate(topups_pipeline))
-            topups_amount = topups_result[0]["total"] if topups_result else 0
-            
-            # Payouts on this day
-            payouts_pipeline = [
-                {"$match": {
-                    "status": "APPROVED",
-                    "approvedAt": {"$gte": day_start, "$lt": day_end}
-                }},
-                {"$group": {"_id": None, "total": {"$sum": "$amount"}}}
-            ]
-            payouts_result = list(withdrawals_collection.aggregate(payouts_pipeline))
-            payouts_amount = payouts_result[0]["total"] if payouts_result else 0
-            
+            day = (get_ist_now().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=i)).strftime("%Y-%m-%d")
+            topups_amount = daily_topups_result.get(day, 0)
+            payouts_amount = daily_payouts_result.get(day, 0)
             daily_reports.append({
-                "date": day_start.strftime("%Y-%m-%d"),
-                "newUsers": new_users,
+                "date": day,
+                "newUsers": daily_users_result.get(day, 0),
                 "topups": topups_amount,
                 "payouts": payouts_amount,
                 "netBusiness": topups_amount - payouts_amount
             })
-        
-        # Income breakdown
-        income_types = {}
-        for income_type in ["REFERRAL_INCOME", "MATCHING_INCOME", "LEVEL_INCOME"]:
-            pipeline = [
-                {"$match": {"type": income_type}},
-                {"$group": {"_id": None, "total": {"$sum": "$amount"}}}
-            ]
-            result = list(transactions_collection.aggregate(pipeline))
-            income_types[income_type] = result[0]["total"] if result else 0
-        
+
+        # ============ INCOME BREAKDOWN - single aggregation instead of 3 ============
+        income_breakdown_pipeline = [
+            {"$match": {"type": {"$in": ["REFERRAL_INCOME", "MATCHING_INCOME", "LEVEL_INCOME"]}}},
+            {"$group": {"_id": "$type", "total": {"$sum": "$amount"}}}
+        ]
+        income_breakdown_result = list(transactions_collection.aggregate(income_breakdown_pipeline))
+        income_types = {"REFERRAL_INCOME": 0, "MATCHING_INCOME": 0, "LEVEL_INCOME": 0}
+        for entry in income_breakdown_result:
+            income_types[entry["_id"]] = entry["total"]
+
         # Recent users
         recent_users = list(users_collection.find(
             {"role": "user"}
         ).sort("createdAt", DESCENDING).limit(5))
-        
-        # Get admin's team stats (PV and team counts)
+
+        # ============ ADMIN TEAM STATS - count from DB instead of recursive ============
         admin_team_stats = {
             "leftPV": 0,
             "rightPV": 0,
@@ -4296,35 +4311,50 @@ async def get_dashboard_reports(
             "rightTeam": 0,
             "totalPV": 0
         }
-        
+
         if admin_user:
             admin_team_stats["leftPV"] = admin_user.get("leftPV", 0)
             admin_team_stats["rightPV"] = admin_user.get("rightPV", 0)
             admin_team_stats["totalPV"] = admin_user.get("totalPV", 0)
-            
-            # Count total team members on each side (recursive)
-            def count_all_downline(parent_id, visited=None):
-                if visited is None:
-                    visited = set()
-                if parent_id in visited:
-                    return 0
-                visited.add(parent_id)
-                
-                count = 0
-                children = list(teams_collection.find({"sponsorId": parent_id}))
-                for child in children:
-                    count += 1
-                    count += count_all_downline(child["userId"], visited)
-                return count
-            
+
             admin_id_str = str(admin_user["_id"])
-            left_child = teams_collection.find_one({"sponsorId": admin_id_str, "placement": "LEFT"})
-            right_child = teams_collection.find_one({"sponsorId": admin_id_str, "placement": "RIGHT"})
-            
+
+            # Build full downline set using iterative BFS instead of recursive N+1
+            all_teams = list(teams_collection.find({}, {"userId": 1, "sponsorId": 1, "placement": 1}))
+            children_map = {}
+            for t in all_teams:
+                sid = t.get("sponsorId")
+                if sid not in children_map:
+                    children_map[sid] = []
+                children_map[sid].append(t)
+
+            # Find direct children of admin
+            left_child = None
+            right_child = None
+            for t in children_map.get(admin_id_str, []):
+                if t.get("placement") == "LEFT":
+                    left_child = t
+                elif t.get("placement") == "RIGHT":
+                    right_child = t
+
+            def count_downline_bfs(root_user_id):
+                count = 0
+                queue = [root_user_id]
+                visited = {root_user_id}
+                while queue:
+                    current = queue.pop(0)
+                    for child in children_map.get(current, []):
+                        cid = child["userId"]
+                        if cid not in visited:
+                            visited.add(cid)
+                            count += 1
+                            queue.append(cid)
+                return count
+
             if left_child:
-                admin_team_stats["leftTeam"] = 1 + count_all_downline(left_child["userId"])
+                admin_team_stats["leftTeam"] = 1 + count_downline_bfs(left_child["userId"])
             if right_child:
-                admin_team_stats["rightTeam"] = 1 + count_all_downline(right_child["userId"])
+                admin_team_stats["rightTeam"] = 1 + count_downline_bfs(right_child["userId"])
         
         return {
             "success": True,
@@ -5953,10 +5983,15 @@ async def get_pending_kyc_submissions(
         
         total = kyc_submissions_collection.count_documents(query)
         
+        # Batch fetch all users for these submissions (avoid N+1)
+        user_ids = list(set(ObjectId(sub["userId"]) for sub in submissions if sub.get("userId")))
+        users_list = list(users_collection.find({"_id": {"$in": user_ids}}))
+        users_map = {str(u["_id"]): u for u in users_list}
+
         # Enrich with user data
         result = []
         for submission in submissions:
-            user = users_collection.find_one({"_id": ObjectId(submission["userId"])})
+            user = users_map.get(submission["userId"])
             if user:
                 # Apply search filter
                 if search:
@@ -5965,7 +6000,7 @@ async def get_pending_kyc_submissions(
                             search_lower in user.get("referralId", "").lower() or
                             search_lower in submission.get("form", {}).get("name", "").lower()):
                         continue
-                
+
                 result.append({
                     "id": str(submission["_id"]),
                     "userId": submission["userId"],
@@ -5977,7 +6012,7 @@ async def get_pending_kyc_submissions(
                     "status": submission.get("status"),
                     "createdAt": submission.get("createdAt")
                 })
-        
+
         return {
             "success": True,
             "data": {
@@ -5987,7 +6022,7 @@ async def get_pending_kyc_submissions(
                 "pageSize": pageSize
             }
         }
-        
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -6005,20 +6040,25 @@ async def get_all_kyc_submissions(
         query = {}
         if status and status != "ALL":
             query["status"] = status
-        
+
         # Get submissions
         skip = (page - 1) * pageSize
         submissions = list(kyc_submissions_collection.find(query)
                           .sort("createdAt", DESCENDING)
                           .skip(skip)
                           .limit(pageSize))
-        
+
         total = kyc_submissions_collection.count_documents(query)
-        
+
+        # Batch fetch all users for these submissions (avoid N+1)
+        user_ids = list(set(ObjectId(sub["userId"]) for sub in submissions if sub.get("userId")))
+        users_list = list(users_collection.find({"_id": {"$in": user_ids}}))
+        users_map = {str(u["_id"]): u for u in users_list}
+
         # Enrich with user data
         result = []
         for submission in submissions:
-            user = users_collection.find_one({"_id": ObjectId(submission["userId"])})
+            user = users_map.get(submission["userId"])
             if user:
                 # Apply search filter
                 if search:
@@ -6027,7 +6067,7 @@ async def get_all_kyc_submissions(
                             search_lower in user.get("referralId", "").lower() or
                             search_lower in submission.get("form", {}).get("name", "").lower()):
                         continue
-                
+
                 result.append({
                     "id": str(submission["_id"]),
                     "userId": submission["userId"],
