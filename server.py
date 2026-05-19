@@ -889,6 +889,16 @@ async def startup_event():
     users_collection.create_index([("role", ASCENDING), ("isActive", ASCENDING)])
     users_collection.create_index([("currentPlan", ASCENDING)])
 
+    # Team compound indexes for tree queries
+    teams_collection.create_index([("sponsorId", ASCENDING), ("placement", ASCENDING)])
+
+    # Tutorial indexes
+    try:
+        tutorials_collection = db["tutorials"]
+        tutorials_collection.create_index([("playlistId", ASCENDING)])
+    except:
+        pass
+
     # Initialize data
     initialize_plans()
     initialize_ranks()
@@ -1392,42 +1402,45 @@ async def get_user_dashboard(current_user: dict = Depends(get_current_active_use
             "totalWithdrawals": 0
         }
         
-        # Helper function to count all downline recursively
-        def count_all_downline(parent_id, visited=None):
-            if visited is None:
-                visited = set()
-            if parent_id in visited:
-                return 0
-            visited.add(parent_id)
-            
+        # Build team tree in memory with single query instead of recursive N+1
+        all_teams = list(teams_collection.find({}, {"userId": 1, "sponsorId": 1, "placement": 1}))
+        children_map = {}
+        for t in all_teams:
+            sid = t.get("sponsorId")
+            if sid not in children_map:
+                children_map[sid] = []
+            children_map[sid].append(t)
+
+        # Find direct children
+        direct_children = children_map.get(user_id, [])
+        left_child = None
+        right_child = None
+        for c in direct_children:
+            if c.get("placement") == "LEFT":
+                left_child = c
+            elif c.get("placement") == "RIGHT":
+                right_child = c
+
+        def count_downline_bfs(root_user_id):
             count = 0
-            children = list(teams_collection.find({"sponsorId": parent_id}))
-            for child in children:
-                count += 1
-                count += count_all_downline(child["userId"], visited)
+            queue = [root_user_id]
+            visited = {root_user_id}
+            while queue:
+                current = queue.pop(0)
+                for child in children_map.get(current, []):
+                    cid = child["userId"]
+                    if cid not in visited:
+                        visited.add(cid)
+                        count += 1
+                        queue.append(cid)
             return count
-        
-        # Get direct team statistics
-        direct_left = teams_collection.count_documents({
-            "sponsorId": user_id,
-            "placement": "LEFT"
-        })
-        direct_right = teams_collection.count_documents({
-            "sponsorId": user_id,
-            "placement": "RIGHT"
-        })
-        
-        # Get total team count for each leg (all downline)
-        left_child = teams_collection.find_one({"sponsorId": user_id, "placement": "LEFT"})
-        right_child = teams_collection.find_one({"sponsorId": user_id, "placement": "RIGHT"})
-        
+
         total_left = 0
         total_right = 0
-        
         if left_child:
-            total_left = 1 + count_all_downline(left_child["userId"])
+            total_left = 1 + count_downline_bfs(left_child["userId"])
         if right_child:
-            total_right = 1 + count_all_downline(right_child["userId"])
+            total_right = 1 + count_downline_bfs(right_child["userId"])
         
         total_team = total_left + total_right
         
@@ -1475,22 +1488,24 @@ async def get_user_dashboard(current_user: dict = Depends(get_current_active_use
             else:
                 todays_earnings = 0
 
-            # 2. Pending Withdrawals
-            pending_payouts = list(withdrawals_collection.find({
-                "userId": user_id,
-                "status": "PENDING"
-            }))
-            pending_withdrawals = sum(p.get("amount", 0) for p in pending_payouts)
+            # 2. Pending Withdrawals - aggregation instead of full scan + Python sum
+            pending_pipeline = [
+                {"$match": {"userId": user_id, "status": "PENDING"}},
+                {"$group": {"_id": None, "total": {"$sum": "$amount"}}}
+            ]
+            pending_result = list(withdrawals_collection.aggregate(pending_pipeline))
+            pending_withdrawals = pending_result[0]["total"] if pending_result else 0
 
             # 3. Referral Income (REMOVED)
             referral_income = 0
 
-            # 4. Matching Income
-            matching_txns = list(transactions_collection.find({
-                "userId": user_id,
-                "type": "MATCHING_BONUS"
-            }))
-            matching_income = sum(t.get("amount", 0) for t in matching_txns)
+            # 4. Matching Income - aggregation instead of full scan + Python sum
+            matching_pipeline = [
+                {"$match": {"userId": user_id, "type": "MATCHING_BONUS"}},
+                {"$group": {"_id": None, "total": {"$sum": "$amount"}}}
+            ]
+            matching_result = list(transactions_collection.aggregate(matching_pipeline))
+            matching_income = matching_result[0]["total"] if matching_result else 0
         except Exception as e:
             print(f"Error calculating stats: {e}")
             todays_earnings = 0
@@ -1541,39 +1556,47 @@ async def get_team_tree(current_user: dict = Depends(get_current_user)):
     """Get user's team tree (binary structure) - allows inactive users to view"""
     try:
         user_id = current_user["id"]
-        
+
+        # Pre-load all data in 3 queries instead of N+1
+        all_users = list(users_collection.find({}, {
+            "name": 1, "referralId": 1, "placement": 1, "currentPlan": 1,
+            "isActive": 1, "leftPV": 1, "rightPV": 1, "totalPV": 1, "profilePhoto": 1
+        }))
+        users_map = {str(u["_id"]): u for u in all_users}
+
+        all_teams = list(teams_collection.find({}, {"sponsorId": 1, "userId": 1, "placement": 1}))
+        children_map = {}
+        for t in all_teams:
+            sid = t.get("sponsorId")
+            if sid not in children_map:
+                children_map[sid] = {}
+            children_map[sid][t.get("placement")] = t
+
+        all_plans = list(plans_collection.find({}, {"name": 1}))
+        plans_map = {str(p["_id"]): p.get("name") for p in all_plans}
+
         def build_tree(parent_id, depth=0, max_depth=50):
             if depth > max_depth:
                 return None
-            
-            user = users_collection.find_one({"_id": ObjectId(parent_id)})
+
+            user = users_map.get(parent_id)
             if not user:
                 return None
-            
-            # Get children from teams collection
-            # sponsorId in teams collection is stored as string of ObjectId
-            left_child = teams_collection.find_one({
-                "sponsorId": str(user["_id"]),
-                "placement": "LEFT"
-            })
-            right_child = teams_collection.find_one({
-                "sponsorId": str(user["_id"]),
-                "placement": "RIGHT"
-            })
-            
-            # Get plan name if exists
+
+            # Resolve plan name
             plan_name = None
-            if user.get("currentPlan"):
-                try:
-                    plan = plans_collection.find_one({"_id": ObjectId(user["currentPlan"])}, {"_id": 0})
-                    if plan:
-                        plan_name = plan.get("name")
-                except Exception:
-                    # If currentPlan is already a string (plan name), use it
-                    plan_name = user.get("currentPlan") if isinstance(user.get("currentPlan"), str) and len(user.get("currentPlan")) < 50 else None
-            
+            cp = user.get("currentPlan")
+            if cp:
+                plan_name = plans_map.get(str(cp))
+                if not plan_name and isinstance(cp, str) and len(cp) < 50:
+                    plan_name = cp
+
+            children = children_map.get(parent_id, {})
+            left_child = children.get("LEFT")
+            right_child = children.get("RIGHT")
+
             node = {
-                "id": str(user["_id"]),
+                "id": parent_id,
                 "name": user["name"],
                 "referralId": user["referralId"],
                 "placement": user.get("placement"),
@@ -1583,20 +1606,13 @@ async def get_team_tree(current_user: dict = Depends(get_current_user)):
                 "rightPV": user.get("rightPV", 0),
                 "totalPV": user.get("totalPV", 0),
                 "profilePhoto": user.get("profilePhoto"),
-                "left": None,
-                "right": None
+                "left": build_tree(left_child["userId"], depth + 1, max_depth) if left_child else None,
+                "right": build_tree(right_child["userId"], depth + 1, max_depth) if right_child else None
             }
-            
-            if left_child:
-                node["left"] = build_tree(left_child["userId"], depth + 1, max_depth)
-            
-            if right_child:
-                node["right"] = build_tree(right_child["userId"], depth + 1, max_depth)
-            
             return node
-        
+
         tree = build_tree(user_id)
-        
+
         return {
             "success": True,
             "data": tree
@@ -1655,31 +1671,33 @@ async def get_user_details(user_id: str, current_user: dict = Depends(get_curren
                     "referralId": sponsor.get("referralId")
                 }
         
-        # Get team count
-        team_count = teams_collection.count_documents({"sponsorId": str(user["_id"])})
-        left_count = teams_collection.count_documents({"sponsorId": str(user["_id"]), "placement": "LEFT"})
-        right_count = teams_collection.count_documents({"sponsorId": str(user["_id"]), "placement": "RIGHT"})
-        
+        # Get team counts - single aggregation instead of 3 count_documents
+        uid_str = str(user["_id"])
+        team_agg = list(teams_collection.aggregate([
+            {"$match": {"sponsorId": uid_str}},
+            {"$group": {"_id": "$placement", "count": {"$sum": 1}}}
+        ]))
+        team_counts = {t["_id"]: t["count"] for t in team_agg}
+        left_count = team_counts.get("LEFT", 0)
+        right_count = team_counts.get("RIGHT", 0)
+        team_count = left_count + right_count
+
         # Get user's own placement from teams collection
-        user_team_record = teams_collection.find_one({"userId": str(user["_id"])})
+        user_team_record = teams_collection.find_one({"userId": uid_str})
         user_placement = user_team_record.get("placement") if user_team_record else None
-        
-        # Get income breakdown from transactions
-        income_breakdown = {
-            "REFERRAL_INCOME": 0,
-            "MATCHING_INCOME": 0,
-            "LEVEL_INCOME": 0
-        }
-        
-        income_types = ["REFERRAL_INCOME", "MATCHING_INCOME", "LEVEL_INCOME"]
-        for income_type in income_types:
-            result = transactions_collection.aggregate([
-                {"$match": {"userId": str(user["_id"]), "type": income_type, "status": "COMPLETED"}},
-                {"$group": {"_id": None, "total": {"$sum": "$amount"}}}
-            ])
-            total = list(result)
-            if total:
-                income_breakdown[income_type] = total[0].get("total", 0)
+
+        # Get income breakdown - single aggregation instead of 3 separate queries
+        income_agg = list(transactions_collection.aggregate([
+            {"$match": {
+                "userId": uid_str,
+                "type": {"$in": ["REFERRAL_INCOME", "MATCHING_INCOME", "LEVEL_INCOME"]},
+                "status": "COMPLETED"
+            }},
+            {"$group": {"_id": "$type", "total": {"$sum": "$amount"}}}
+        ]))
+        income_breakdown = {"REFERRAL_INCOME": 0, "MATCHING_INCOME": 0, "LEVEL_INCOME": 0}
+        for entry in income_agg:
+            income_breakdown[entry["_id"]] = entry["total"]
         
         # Build response
         user_details = {
@@ -1918,37 +1936,57 @@ async def get_admin_team_tree(
 ):
     """Get team tree for any user (admin only)"""
     try:
+        # Find user by referralId or ObjectId
+        try:
+            target_user = users_collection.find_one({"_id": ObjectId(user_id)})
+        except:
+            target_user = users_collection.find_one({"referralId": user_id})
+
+        if not target_user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        target_user_id = str(target_user["_id"])
+
+        # Pre-load all data in 3 queries instead of N+1
+        all_users = list(users_collection.find({}, {
+            "name": 1, "referralId": 1, "placement": 1, "currentPlan": 1,
+            "isActive": 1, "leftPV": 1, "rightPV": 1, "totalPV": 1, "profilePhoto": 1
+        }))
+        users_map = {str(u["_id"]): u for u in all_users}
+
+        all_teams = list(teams_collection.find({}, {"sponsorId": 1, "userId": 1, "placement": 1}))
+        children_map = {}
+        for t in all_teams:
+            sid = t.get("sponsorId")
+            if sid not in children_map:
+                children_map[sid] = {}
+            children_map[sid][t.get("placement")] = t
+
+        all_plans = list(plans_collection.find({}, {"name": 1}))
+        plans_map = {str(p["_id"]): p.get("name") for p in all_plans}
+
         def build_tree(parent_id: str, depth=0, max_depth=50) -> dict:
             if depth > max_depth:
                 return None
-                
-            user = users_collection.find_one({"_id": ObjectId(parent_id)})
+
+            user = users_map.get(parent_id)
             if not user:
                 return None
-            
-            # Get left and right children from teams collection
-            left_child = teams_collection.find_one({
-                "sponsorId": str(user["_id"]),
-                "placement": "LEFT"
-            })
-            right_child = teams_collection.find_one({
-                "sponsorId": str(user["_id"]),
-                "placement": "RIGHT"
-            })
-            
-            # Get plan name if exists
+
+            # Resolve plan name
             plan_name = None
-            if user.get("currentPlan"):
-                try:
-                    plan = plans_collection.find_one({"_id": ObjectId(user["currentPlan"])}, {"_id": 0})
-                    if plan:
-                        plan_name = plan.get("name")
-                except Exception:
-                    # If currentPlan is already a string (plan name), use it
-                    plan_name = user.get("currentPlan") if isinstance(user.get("currentPlan"), str) and len(user.get("currentPlan")) < 50 else None
-            
+            cp = user.get("currentPlan")
+            if cp:
+                plan_name = plans_map.get(str(cp))
+                if not plan_name and isinstance(cp, str) and len(cp) < 50:
+                    plan_name = cp
+
+            children = children_map.get(parent_id, {})
+            left_child = children.get("LEFT")
+            right_child = children.get("RIGHT")
+
             node = {
-                "id": str(user["_id"]),
+                "id": parent_id,
                 "name": user["name"],
                 "referralId": user["referralId"],
                 "placement": user.get("placement"),
@@ -1958,30 +1996,13 @@ async def get_admin_team_tree(
                 "rightPV": user.get("rightPV", 0),
                 "totalPV": user.get("totalPV", 0),
                 "profilePhoto": user.get("profilePhoto"),
-                "left": None,
-                "right": None
+                "left": build_tree(left_child["userId"], depth + 1, max_depth) if left_child else None,
+                "right": build_tree(right_child["userId"], depth + 1, max_depth) if right_child else None
             }
-            
-            if left_child:
-                node["left"] = build_tree(left_child["userId"], depth + 1, max_depth)
-            
-            if right_child:
-                node["right"] = build_tree(right_child["userId"], depth + 1, max_depth)
-            
             return node
-        
-        # Find user by referralId or ObjectId
-        try:
-            target_user = users_collection.find_one({"_id": ObjectId(user_id)})
-        except:
-            target_user = users_collection.find_one({"referralId": user_id})
-        
-        if not target_user:
-            raise HTTPException(status_code=404, detail="User not found")
-        
-        target_user_id = str(target_user["_id"])
+
         tree = build_tree(target_user_id)
-        
+
         return {
             "success": True,
             "data": serialize_doc(tree)
@@ -2823,6 +2844,40 @@ async def get_withdrawal_history(current_user: dict = Depends(get_current_active
         return {
             "success": True,
             "data": serialize_doc(withdrawals)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ==================== PUBLIC STATS ROUTE ====================
+
+@app.get("/api/stats/public")
+async def get_public_stats():
+    """Get public platform statistics for homepage/about/plans pages"""
+    try:
+        total_members = users_collection.count_documents({"role": "user"})
+        active_members = users_collection.count_documents({"role": "user", "isActive": True})
+
+        pipeline = [
+            {"$group": {
+                "_id": None,
+                "totalPayouts": {"$sum": "$totalWithdrawals"},
+                "totalEarnings": {"$sum": "$totalEarnings"}
+            }}
+        ]
+        wallet_stats = list(wallets_collection.aggregate(pipeline))
+        wallet_data = wallet_stats[0] if wallet_stats else {"totalPayouts": 0, "totalEarnings": 0}
+
+        total_plans = plans_collection.count_documents({"isActive": True})
+
+        return {
+            "success": True,
+            "data": {
+                "totalMembers": total_members,
+                "activeMembers": active_members,
+                "totalPayouts": wallet_data.get("totalPayouts", 0),
+                "totalEarnings": wallet_data.get("totalEarnings", 0),
+                "totalPlans": total_plans,
+            }
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -4585,17 +4640,16 @@ async def get_users_by_plan_report(
         
         users = list(users_collection.find(query, {"password": 0}))
         
+        # Batch load plans for lookup
+        all_plans_list = list(plans_collection.find({}, {"name": 1}))
+        plans_name_map = {str(p["_id"]): p.get("name", "No Plan") for p in all_plans_list}
+
         report_data = []
         for user in users:
             plan_name = "No Plan"
             if user.get("currentPlan"):
-                try:
-                    plan = plans_collection.find_one({"_id": ObjectId(user["currentPlan"])})
-                    if plan:
-                        plan_name = plan.get("name", "No Plan")
-                except:
-                    pass
-            
+                plan_name = plans_name_map.get(str(user["currentPlan"]), user.get("currentPlan", "No Plan"))
+
             report_data.append({
                 "Referral ID": user.get("referralId", ""),
                 "Name": user.get("name", ""),
@@ -4651,10 +4705,15 @@ async def get_earnings_report(
                 query["createdAt"]["$lte"] = end
         
         transactions = list(transactions_collection.find(query))
-        
+
+        # Batch fetch users for all transactions
+        txn_user_ids = list(set(ObjectId(t["userId"]) for t in transactions if t.get("userId") and ObjectId.is_valid(t["userId"])))
+        txn_users = list(users_collection.find({"_id": {"$in": txn_user_ids}}, {"name": 1, "referralId": 1})) if txn_user_ids else []
+        txn_users_map = {str(u["_id"]): u for u in txn_users}
+
         report_data = []
         for txn in transactions:
-            user = users_collection.find_one({"_id": ObjectId(txn.get("userId"))})
+            user = txn_users_map.get(txn.get("userId"))
             report_data.append({
                 "Date": txn.get("createdAt", datetime.now()).strftime("%d-%m-%Y %I:%M %p") if txn.get("createdAt") else "",
                 "User": user.get("name", "") if user else "",
@@ -4784,10 +4843,15 @@ async def get_withdrawals_report(
             query["status"] = status.upper()
         
         withdrawals = list(withdrawals_collection.find(query))
-        
+
+        # Batch fetch users
+        w_user_ids = list(set(ObjectId(w["userId"]) for w in withdrawals if w.get("userId") and ObjectId.is_valid(w["userId"])))
+        w_users = list(users_collection.find({"_id": {"$in": w_user_ids}}, {"name": 1, "referralId": 1})) if w_user_ids else []
+        w_users_map = {str(u["_id"]): u for u in w_users}
+
         report_data = []
         for withdrawal in withdrawals:
-            user = users_collection.find_one({"_id": ObjectId(withdrawal.get("userId"))})
+            user = w_users_map.get(withdrawal.get("userId"))
             report_data.append({
                 "Date": withdrawal.get("createdAt", datetime.now()).strftime("%d-%m-%Y") if withdrawal.get("createdAt") else "",
                 "User": user.get("name", "") if user else "",
@@ -4850,10 +4914,15 @@ async def get_topups_report(
                 query["createdAt"]["$lte"] = end
         
         topups = list(topups_collection.find(query))
-        
+
+        # Batch fetch users
+        tp_user_ids = list(set(ObjectId(t["userId"]) for t in topups if t.get("userId") and ObjectId.is_valid(t["userId"])))
+        tp_users = list(users_collection.find({"_id": {"$in": tp_user_ids}}, {"name": 1, "referralId": 1})) if tp_user_ids else []
+        tp_users_map = {str(u["_id"]): u for u in tp_users}
+
         report_data = []
         for topup in topups:
-            user = users_collection.find_one({"_id": ObjectId(topup.get("userId"))})
+            user = tp_users_map.get(topup.get("userId"))
             report_data.append({
                 "Date": topup.get("createdAt", datetime.now()).strftime("%d-%m-%Y") if topup.get("createdAt") else "",
                 "User": user.get("name", "") if user else "",
@@ -4983,12 +5052,28 @@ async def get_team_structure_report(
     """Get complete team structure report"""
     try:
         teams = list(teams_collection.find({}))
-        
+
+        # Batch fetch all users and sponsors
+        all_ids = set()
+        for team in teams:
+            if team.get("userId"):
+                try:
+                    all_ids.add(ObjectId(team["userId"]))
+                except:
+                    pass
+            if team.get("sponsorId"):
+                try:
+                    all_ids.add(ObjectId(team["sponsorId"]))
+                except:
+                    pass
+        all_users_list = list(users_collection.find({"_id": {"$in": list(all_ids)}}, {"name": 1, "createdAt": 1}))
+        users_batch_map = {str(u["_id"]): u for u in all_users_list}
+
         report_data = []
         for team in teams:
-            user = users_collection.find_one({"referralId": team.get("userId")})
-            sponsor = users_collection.find_one({"referralId": team.get("sponsorId")})
-            
+            user = users_batch_map.get(team.get("userId"))
+            sponsor = users_batch_map.get(team.get("sponsorId"))
+
             if user:
                 report_data.append({
                     "User ID": team.get("userId", ""),
@@ -5036,35 +5121,45 @@ async def get_downline_report(
             users_to_check = [users_collection.find_one({"referralId": referral_id})]
         else:
             users_to_check = list(users_collection.find({"role": "user"}))
-        
+
+        # Pre-load all teams in 1 query
+        all_teams_data = list(teams_collection.find({}, {"sponsorId": 1, "userId": 1}))
+        children_map = {}
+        direct_count_map = {}
+        for t in all_teams_data:
+            sid = t.get("sponsorId")
+            if sid not in children_map:
+                children_map[sid] = []
+            children_map[sid].append(t["userId"])
+            direct_count_map[sid] = direct_count_map.get(sid, 0) + 1
+
+        def count_total_downline(user_id):
+            count = 0
+            queue = [user_id]
+            visited = {user_id}
+            while queue:
+                current = queue.pop(0)
+                for child_id in children_map.get(current, []):
+                    if child_id not in visited:
+                        visited.add(child_id)
+                        count += 1
+                        queue.append(child_id)
+            return count
+
         report_data = []
         for user in users_to_check:
             if not user:
                 continue
-                
-            user_id = user.get("referralId", "")
-            
-            # Count direct downline
-            direct_count = teams_collection.count_documents({"sponsorId": user_id})
-            
-            # Get all downline recursively
-            def get_all_downline(sponsor_id, visited=None):
-                if visited is None:
-                    visited = set()
-                if sponsor_id in visited:
-                    return []
-                visited.add(sponsor_id)
-                
-                direct = list(teams_collection.find({"sponsorId": sponsor_id}))
-                all_downline = direct.copy()
-                for member in direct:
-                    all_downline.extend(get_all_downline(member.get("userId"), visited))
-                return all_downline
-            
-            total_downline = len(get_all_downline(user_id))
-            
+
+            # sponsorId in teams is stored as str(ObjectId)
+            user_id_str = str(user["_id"])
+            referral = user.get("referralId", "")
+
+            direct_count = direct_count_map.get(user_id_str, 0)
+            total_downline = count_total_downline(user_id_str)
+
             report_data.append({
-                "Referral ID": user_id,
+                "Referral ID": referral,
                 "Name": user.get("name", ""),
                 "Direct Downline": direct_count,
                 "Total Downline": total_downline,
@@ -5103,10 +5198,17 @@ async def get_binary_tree_export(
     """Export binary tree data"""
     try:
         teams = list(teams_collection.find({}))
-        
+
+        # Batch fetch all users (userId in teams is str(ObjectId))
+        bt_user_ids = list(set(
+            ObjectId(t["userId"]) for t in teams if t.get("userId") and ObjectId.is_valid(t["userId"])
+        ))
+        bt_users = list(users_collection.find({"_id": {"$in": bt_user_ids}}, {"name": 1, "isActive": 1})) if bt_user_ids else []
+        bt_users_map = {str(u["_id"]): u for u in bt_users}
+
         report_data = []
         for team in teams:
-            user = users_collection.find_one({"referralId": team.get("userId")})
+            user = bt_users_map.get(team.get("userId"))
             if user:
                 report_data.append({
                     "User ID": team.get("userId", ""),
@@ -5224,23 +5326,27 @@ async def get_plan_distribution_report(
     """Get plan distribution analysis"""
     try:
         plans = list(plans_collection.find({}))
-        
+
+        # Single aggregation for plan counts instead of N count_documents
+        plan_counts_pipeline = [
+            {"$match": {"currentPlan": {"$ne": None}}},
+            {"$group": {"_id": "$currentPlan", "count": {"$sum": 1}}}
+        ]
+        plan_counts_raw = list(users_collection.aggregate(plan_counts_pipeline))
+        plan_counts_map = {str(pc["_id"]): pc["count"] for pc in plan_counts_raw}
+
         report_data = []
         total_users_with_plan = 0
-        
+
         for plan in plans:
             plan_id_str = str(plan["_id"])
-            count = users_collection.count_documents({
-                "$or": [
-                    {"currentPlan": plan_id_str},
-                    {"currentPlan": plan["_id"]},
-                    {"currentPlan": plan["name"]}
-                ]
-            })
+            plan_name = plan.get("name", "")
+            # Check both ObjectId string and plan name as keys
+            count = plan_counts_map.get(plan_id_str, 0) + plan_counts_map.get(plan_name, 0)
             total_users_with_plan += count
-            
+
             report_data.append({
-                "Plan Name": plan.get("name", ""),
+                "Plan Name": plan_name,
                 "Price": f"₹{plan.get('price', 0)}",
                 "User Count": count,
                 "Revenue": f"₹{plan.get('price', 0) * count}"
@@ -6411,14 +6517,19 @@ async def get_playlists(current_admin: dict = Depends(get_current_admin)):
     """List all playlists"""
     try:
         playlists = list(playlists_collection.find().sort("createdAt", -1))
-        # Count videos in each playlist
+
+        # Single aggregation for all video counts instead of N count_documents
+        video_counts_agg = list(tutorials_collection.aggregate([
+            {"$group": {"_id": "$playlistId", "count": {"$sum": 1}}}
+        ]))
+        video_counts_map = {vc["_id"]: vc["count"] for vc in video_counts_agg}
+
         result_data = []
         for pl in playlists:
-            video_count = tutorials_collection.count_documents({"playlistId": str(pl["_id"])})
             pl_data = serialize_doc(pl)
-            pl_data["videoCount"] = video_count
+            pl_data["videoCount"] = video_counts_map.get(str(pl["_id"]), 0)
             result_data.append(pl_data)
-            
+
         return {"success": True, "data": result_data}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -6509,17 +6620,19 @@ async def get_admin_videos(current_admin: dict = Depends(get_current_admin)):
     """List all videos for admin"""
     try:
         videos = list(tutorials_collection.find().sort("createdAt", -1))
-        
+
+        # Batch fetch all playlists instead of N+1
+        all_playlists = list(playlists_collection.find({}, {"name": 1}))
+        playlists_map = {str(p["_id"]): p.get("name") for p in all_playlists}
+
         # Enrich with playlist names
         result_data = []
         for vid in videos:
             vid_data = serialize_doc(vid)
             if vid_data.get("playlistId"):
-                pl = playlists_collection.find_one({"_id": ObjectId(vid_data["playlistId"])})
-                if pl:
-                    vid_data["playlistName"] = pl.get("name")
+                vid_data["playlistName"] = playlists_map.get(vid_data["playlistId"])
             result_data.append(vid_data)
-            
+
         return {"success": True, "data": result_data}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -6603,96 +6716,99 @@ async def get_weak_members_report(
         
         target_user_id = str(target_user["_id"])
         
-        # Get all downline members recursively
-        def get_all_downline(parent_id, side=None, depth=0, max_depth=50):
-            if depth > max_depth:
-                return []
-            
-            members = []
-            
-            # Get direct children
-            children = list(teams_collection.find({"sponsorId": parent_id}))
-            
-            for child in children:
-                child_user = users_collection.find_one({"_id": ObjectId(child["userId"])})
-                if child_user:
-                    child_side = child.get("placement", "UNKNOWN")
-                    members.append({
-                        "user": child_user,
-                        "side": child_side if depth == 0 else side,  # Track original side from root
-                        "depth": depth + 1
-                    })
-                    # Get their downline
-                    members.extend(get_all_downline(child["userId"], child_side if depth == 0 else side, depth + 1, max_depth))
-            
-            return members
-        
-        # Get all downline
-        all_downline = get_all_downline(target_user_id)
-        
-        # Analyze weakness
+        # Pre-load all data in 3 queries instead of N+1 recursive
+        all_users = list(users_collection.find({}, {
+            "name": 1, "referralId": 1, "currentPlan": 1, "isActive": 1,
+            "totalPV": 1, "leftPV": 1, "rightPV": 1, "profilePhoto": 1, "createdAt": 1
+        }))
+        users_map = {str(u["_id"]): u for u in all_users}
+
+        all_teams = list(teams_collection.find({}, {"sponsorId": 1, "userId": 1, "placement": 1}))
+        children_map = {}
+        for t in all_teams:
+            sid = t.get("sponsorId")
+            if sid not in children_map:
+                children_map[sid] = []
+            children_map[sid].append(t)
+
+        all_plans = list(plans_collection.find({}, {"name": 1}))
+        plans_map = {str(p["_id"]): p.get("name") for p in all_plans}
+
+        # BFS to get all downline with side tracking
+        all_downline = []
+        queue = []
+        direct_children = children_map.get(target_user_id, [])
+        for child in direct_children:
+            child_side = child.get("placement", "UNKNOWN")
+            queue.append((child["userId"], child_side, 1))
+
+        visited = {target_user_id}
+        while queue:
+            uid, side, depth = queue.pop(0)
+            if uid in visited or depth > 50:
+                continue
+            visited.add(uid)
+            user_data = users_map.get(uid)
+            if user_data:
+                all_downline.append({"user": user_data, "side": side, "depth": depth, "uid": uid})
+                for child in children_map.get(uid, []):
+                    queue.append((child["userId"], side, depth + 1))
+
+        # Analyze weakness using pre-loaded children_map
         weak_members = []
-        
+
         for member_data in all_downline:
             member = member_data["user"]
-            member_id = str(member["_id"])
+            member_id = member_data["uid"]
             side = member_data["side"]
-            
+
             weakness_reasons = []
-            
-            # Check 1: No downline (no team members)
-            team_count = teams_collection.count_documents({"sponsorId": str(member["_id"])})
-            if team_count == 0:
+            member_children = children_map.get(member_id, [])
+            has_left = any(c.get("placement") == "LEFT" for c in member_children)
+            has_right = any(c.get("placement") == "RIGHT" for c in member_children)
+
+            if not has_left and not has_right:
                 weakness_reasons.append({
                     "type": "NO_DOWNLINE",
                     "message": "No team members under this user",
                     "severity": "MEDIUM"
                 })
-            severity = "LOW" # Default to LOW, will be updated if higher severity weakness is found
-
-            # Check for binary legs
-            left_leg = teams_collection.find_one({"sponsorId": str(member["_id"]), "placement": "LEFT"})
-            right_leg = teams_collection.find_one({"sponsorId": str(member["_id"]), "placement": "RIGHT"})
-            
-            if not left_leg and not right_leg:
                 weakness_reasons.append({
                     "type": "MISSING_BOTH",
                     "message": "No Team (Missing Left & Right)",
                     "severity": "CRITICAL"
                 })
                 severity = "CRITICAL"
-            elif not left_leg:
+            elif not has_left:
                 weakness_reasons.append({
                     "type": "MISSING_LEFT",
                     "message": "Missing Left Team",
                     "severity": "HIGH"
                 })
                 severity = "HIGH"
-            elif not right_leg:
+            elif not has_right:
                 weakness_reasons.append({
                     "type": "MISSING_RIGHT",
                     "message": "Missing Right Team",
                     "severity": "HIGH"
                 })
                 severity = "HIGH"
-            
-            # Only add if there is a weakness
+            else:
+                severity = "LOW"
+
             if weakness_reasons:
-                # Get plan name
                 plan_name = None
-                if member.get("currentPlan"):
-                    try:
-                        plan = plans_collection.find_one({"_id": ObjectId(member["currentPlan"])})
-                        if plan:
-                            plan_name = plan.get("name")
-                    except:
-                        plan_name = member.get("currentPlan") if len(str(member.get("currentPlan", ""))) < 50 else None
+                cp = member.get("currentPlan")
+                if cp:
+                    plan_name = plans_map.get(str(cp))
+                    if not plan_name and isinstance(cp, str) and len(cp) < 50:
+                        plan_name = cp
 
                 weak_members.append({
                     "id": member_id,
                     "name": member.get("name"),
                     "referralId": member.get("referralId"),
-                    "side": member_data["side"],  # Side relative to the target user
+                    "side": side,
                     "totalPV": member.get("totalPV", 0),
                     "leftPV": member.get("leftPV", 0),
                     "rightPV": member.get("rightPV", 0),
@@ -6703,23 +6819,20 @@ async def get_weak_members_report(
                     "weaknessReasons": weakness_reasons,
                     "overallSeverity": severity
                 })
-                
 
-        
         # Sort by severity (CRITICAL first, then HIGH, then MEDIUM)
         severity_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
         weak_members.sort(key=lambda x: severity_order.get(x["overallSeverity"], 4))
-        
+
         # Group by side
         left_weak = [m for m in weak_members if m["side"] == "LEFT"]
         right_weak = [m for m in weak_members if m["side"] == "RIGHT"]
-        
-        # Analyze target user weakness (The "Hero" status)
+
+        # Analyze target user weakness
         target_weakness = None
-        
-        # Check target user's legs
-        target_left = teams_collection.find_one({"sponsorId": target_user_id, "placement": "LEFT"})
-        target_right = teams_collection.find_one({"sponsorId": target_user_id, "placement": "RIGHT"})
+        target_children = children_map.get(target_user_id, [])
+        target_left = any(c.get("placement") == "LEFT" for c in target_children)
+        target_right = any(c.get("placement") == "RIGHT" for c in target_children)
         
         if not target_left and not target_right:
             target_weakness = {
